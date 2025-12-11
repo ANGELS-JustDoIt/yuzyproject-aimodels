@@ -2,3 +2,4 @@ venv/
 test.ipynb
 .gitignore
 project_full_context.txt
+.png

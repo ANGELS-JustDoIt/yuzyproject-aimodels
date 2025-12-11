@@ -1,4 +1,62 @@
 {
-  "flows": [],
-  "total_flows": 0
+  "flows": [
+    {
+      "flow_name": "Signup User Creation",
+      "sequence": [
+        {
+          "step": 1,
+          "type": "Function Call",
+          "description": "Create JWT Token",
+          "from": {
+            "focus_word": "createJwtToken",
+            "code_snippet": "await createJwtToken(id)"
+          },
+          "to": {
+            "focus_word": "res.send",
+            "code_snippet": "res.send({ token: jwtToken });"
+          }
+        },
+        {
+          "step": 2,
+          "type": "Function Call",
+          "description": "Find User by UserID",
+          "from": {
+            "focus_word": "signup",
+            "code_snippet": "const found = await authRepository.findByUserid(userid);"
+          },
+          "to": {
+            "focus_word": "if",
+            "code_snippet": "if (found) {"
+          }
+        },
+        {
+          "step": 3,
+          "type": "Function Call",
+          "description": "Send Response",
+          "from": {
+            "focus_word": "if",
+            "code_snippet": "if (found) {"
+          },
+          "to": {
+            "focus_word": "return res.status(400).send({ message: 'User already exists' });"
+          }
+        },
+        {
+          "step": 4,
+          "type": "Function Call",
+          "description": "Hash Password",
+          "from": {
+            "focus_word": "signup",
+            "code_snippet": "const hashedPassword = await bcrypt.hash(password, config.bcrypt.saltRounds);"
+          },
+          "to": {
+            "focus_word": "authRepository.save",
+            "code_snippet": "await authRepository.save({ userid, password: hashedPassword, name, email, url });"
+          }
+        }
+      ],
+      "source_file": "<full_context>"
+    }
+  ],
+  "total_flows": 1
 }
