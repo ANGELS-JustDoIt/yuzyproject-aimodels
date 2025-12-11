@@ -1,0 +1,58 @@
+{
+  "project_summary": "Deep dive into 'createJwtToken'",
+  "flows": [
+    {
+      "flow_name": "Analysis of createJwtToken",
+      "sequence": [
+        {
+          "step": 1,
+          "file_context": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+          "from": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "export async function createJwtToken(id) { return jwt.sign({ id }, config.jwt.secretKey, { expiresIn: config.jwt.expiresInSec, }); }",
+            "focus_word": "createJwtToken"
+          },
+          "to": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "const token = await createJwtToken(user);",
+            "focus_word": "createJwtToken"
+          },
+          "data_transferred": "{id} -> JWT Token",
+          "beginner_explanation": "The 'createJwtToken' function takes a user ID as input and uses it to create a JWT token with a secret key and expiration time defined in the configuration. It returns the generated JWT token."
+        },
+        {
+          "step": 2,
+          "file_context": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+          "from": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "export async function signup(req, res, next) { const { userid, password, name, email, url } = req.body; const hashed = bcrypt.hashSync(password, config.bcrypt.saltRounds); const user = await authRepository.createUser({ userid, password: hashed, name, email, url }); const token = await createJwtToken(user); res.status(201).json({ token, userid });",
+            "focus_word": "signup"
+          },
+          "to": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "const token = await createJwtToken(user);",
+            "focus_word": "createJwtToken"
+          },
+          "data_transferred": "{userid, password, name, email, url} -> JWT Token",
+          "beginner_explanation": "During the user signup process, the 'createJwtToken' function is called with the user's ID, password, name, email, and URL. After creating a hashed password, a new user is created in the database. The function then generates a JWT token for the new user, which is returned along with the user's ID."
+        },
+        {
+          "step": 2,
+          "file_context": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+          "from": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "export async function login(req, res, next) { const { userid, password } = req.body; const user = await authRepository.findByUserid(userid); if (!user) { res.status(401).json(`${userid}를 찾을 수 없음`); } const isVaildPassword = await bcrypt.compare(password, user.password); if (!isVaildPassword) { return res.status(401).json({ message: `아이디 또는 비밀번호 확인` }); } const token = await createJwtToken(user.id); res.status(200).json({ token, userid });",
+            "focus_word": "login"
+          },
+          "to": {
+            "file": "C:\\Pyg\\X\\Server\\controller\\auth.mjs",
+            "code_snippet": "const token = await createJwtToken(user.id);",
+            "focus_word": "createJwtToken"
+          },
+          "data_transferred": "{userid, password} -> JWT Token",
+          "beginner_explanation": "During the user login process, the 'createJwtToken' function is called with the user'aineid. After verifying the user's credentials, the function generates a JWT token for the authenticated user, which is returned along with the user's ID."
+        }
+      ]
+    }
+  ]
+}
