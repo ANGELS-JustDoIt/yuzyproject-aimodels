@@ -1,0 +1,165 @@
+{
+  "project_summary": "A web application with user authentication and posts management, using Express.js, MongoDB, and various middleware for handling requests, validating input, and managing user sessions.",
+  "flows": [
+    {
+      "flow_name": "User Signup Process (Data Flow)",
+      "sequence": [
+        {
+          "step": 1,
+          "file_context": "app.mjs",
+          "from": {
+            "file": "router/auth.mjs",
+            "code_snippet": "router.post('/signup', ...)",
+            "focus_word": "signup"
+          },
+          "to": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "export async function signup(req, res)...",
+            "focus_word": "signup"
+          },
+          "data_transferred": "req.body (userid, password, name, email, url)",
+          "beginner_explanation": "1. The Router receives the user's data. 2. It passes the data to the Controller's 'signup' function to handle the logic."
+        },
+        {
+          "step": 2,
+          "file_context": "controller/authController.mjs",
+          "from": {
+            "file": "controller/auth.mjs",
+            "code_snippet": "const hashed = bcrypt.hashSync(password, config.bcrypt.saltRounds);",
+            "focus_word": "hashSync"
+          },
+          "to": {
+            "file": "data/authRepository.mjs",
+            "code_snippet": "export async function createUser(user) { ... }",
+            "focus_word": "createUser"
+          },
+          "data_transferred": "User Info Object with hashed password",
+          "beginner_explanation": "The Controller prepares the user's information, including a hashed password, and sends it to the Repository to create a new user in the Database. It waits (await) for the database to finish.",
+          "return_expected": "The created User ID"
+        },
+        {
+          "step": 3,
+          "file_context": "data/authRepository.mjs",
+          "from": {
+            "file": "data/authRepository.mjs",
+            "code_snippet": "export async function createUser(user) { return new User(user).save().then((data) => data.id); }",
+            "focus_word": "createUser"
+          },
+          "to": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "return new User(user).save().then((data) => data.id);",
+            "focus_word": "createUser"
+          },
+          "data_transferred": "User ID",
+          "beginner_explanation": "The Repository creates a new user in the Database and returns the user's unique ID.",
+          "return_expected": "The User ID of the newly created user"
+        },
+        {
+          "step": 4,
+          "file_context": "controller/authController.mjs",
+          "from": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "export async function login(req, res, next) { ... }",
+            "focus_word": "login"
+          },
+          "to": {
+            "file": "middleware/auth.mjs",
+            "code_snippet": "export const isAuth = async (req, res, next) => { ... };",
+            "focus_word": "isAuth"
+          },
+          "data_transferred": "JWT token",
+          "beginner_explanation": "When a user logs in, the system checks the JWT token for validity.",
+          "return_expected": "A JWT token if valid, or an error status if not."
+        }
+      ]
+    },
+    {
+      "flow_name": "User Login Process (Data Flow)",
+      "sequence": [
+        {
+          "step": 1,
+          "file_context": "app.mjs",
+          "from": {
+            "file": "router/auth.mjs",
+            "code_snippet": "router.post('/login', ...)",
+            "focus_word": "login"
+          },
+          "to": {
+            "file": "middleware/auth.mjs",
+            "code_snippet": "export const isAuth = async (req, res, next) => { ... };",
+            "focus_word": "isAuth"
+          },
+          "data_transferred": "JWT token",
+          "beginner_explanation": "The system receives the JWT token from the user's login request.",
+          "return_expected": "A JWT token if valid, or an error status if not."
+        },
+        {
+          "step": 2,
+          "file_context": "middleware/auth.mjs",
+          "from": {
+            "file": "middleware/auth.mjs",
+            "code_snippet": "export const isAuth = async (req, res, next) => { ... };",
+            "focus_word": "isAuth"
+          },
+          "to": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "export async function login(req, res, next) { ... };",
+            "focus_word": "login"
+          },
+          "data_transferred": "JWT token",
+          "beginner_explanation": "The system validates the JWT token with the database.",
+          "return_expected": "A JWT token if valid, or an error status if not."
+        },
+        {
+          "step": 3,
+          "file_context": "controller/authController.mjs",
+          "from": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "export async function login(req, res, next) { ... };",
+            "focus_word": "login"
+          },
+          "to": {
+            "file": "controller/authController.mjs",
+            "code_snippet": "return res.status(200).json({ token, userid });",
+            "focus_word": "login"
+          },
+          "data_transferred": "JWT token and userid",
+          "beginner_explanation": "If the login is successful, the system returns the JWT token and user's ID.",
+          "return_expected": "A JWT token and user's ID"
+        }
+      ]
+    },
+    {
+      "flow_name": "User Profile Retrieval (Data Flow)",
+      "sequence": [
+      ],
+      "file_context": "app.mjs",
+      "from": {
+        "file": "router/auth.mjs",
+        "code_snippet": "router.post('/me', isAuth, authController.me);",
+        "focus_word": "me"
+      },
+      "to": {
+        "file": "controller/authController.mjs",
+        "code_snippet": "export async function me(req, res, next) { ... };",
+        "focus_word": "me"
+      },
+      "data_transferred": "JWT token",
+      "beginner_explanation": "The system receives the JWT token from the 'me' request.",
+      "return_expected": "User's ID and JWT token if valid, or an error status if not."
+    },
+    {
+      "flow_name": "Post Management (Data Flow)",
+      "sequence": [
+      ],
+      "file_context": "app.mjs",
+      "from": {
+        "file": "router/posts.mjs",
+        "code_snippet": "router.get('/', isAuth, postController.getPosts);",
+        "focus_word": "getPosts"
+      },
+      "to": {
+        "file": "controller/postController.mjs",
+        "code_snippet": "export async function getPosts(req, res, next) { ... };",
+        "focus_word": "getPosts"
+      }
