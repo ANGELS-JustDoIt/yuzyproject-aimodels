@@ -1,0 +1,98 @@
+{
+  "api": [
+    {
+      "category": "auth",
+      "categoryName": "Auth Feature",
+      "endpoints": [
+        {
+          "method": "POST",
+          "url": "/auth/signup",
+          "function": "signup",
+          "file": "controller/auth.mjs",
+          "description": "User Signup",
+          "children": [
+            {
+              "function": "validateSignup",
+              "file": "router/auth.mjs",
+              "description": "Validation Chain",
+              "children": []
+            },
+            {
+              "function": "bcrypt.hashSync",
+              "file": "controller/auth.mjs",
+              "description": "Password Hashing",
+              "children": []
+            },
+            {
+              "function": "createUser",
+              "file": "data/auth.mjs",
+              "description": "Save to DB",
+              "children": [
+                {
+                  "function": "User.save()",
+                  "file": "mongoose",
+                  "description": "MongoDB Insert",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/auth/login",
+          "function": "login",
+          "file": "controller/auth.mjs",
+          "description": "User Login",
+          "children": [
+            {
+              "function": "validateLogin",
+              "file": "router/auth.mjs",
+              "description": "Validation Chain",
+              "children": []
+            },
+            {
+              "function": "bcrypt.compare",
+              "file": "controller/auth.mjs",
+              "description": "Password Verification",
+              "children": []
+            },
+            {
+              "function": "createJwtToken",
+              "file": "controller/auth.mjs",
+              "description": "Create JWT Token",
+              "children": []
+            },
+            {
+              "function": "res.status(200).json({ token, userid })",
+              "file": "controller/auth.mjs",
+              "description": "Send JWT Token and User ID",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "url": "/auth/me",
+          "function": "me",
+          "file": "controller/auth.mjs",
+          "description": "Get Current User Info",
+          "children": [
+            {
+              "function": "authRepository.findById(req.id)",
+              "file": "data/auth.mjs",
+              "description": "Find User by ID",
+              "children": []
+            },
+            {
+              "function": "res.status(200).json({ token, userid })",
+              "file": "controller/auth.mjs",
+              "description": "Send JWT Token and User ID",
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
