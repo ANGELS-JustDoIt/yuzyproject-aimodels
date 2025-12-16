@@ -3,3 +3,8 @@ test.ipynb
 .gitignore
 project_full_context.txt
 .png
+rendered_code_cards/
+server/
+project_full_context_2.txt
+
+test/

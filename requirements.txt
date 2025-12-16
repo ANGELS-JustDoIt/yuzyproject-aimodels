@@ -85,3 +85,11 @@ typing_extensions==4.15.0
 uritemplate==4.2.0
 urllib3==2.6.1
 wcwidth==0.2.14
+
+fastapi
+uvicorn[standard]
+torch
+transformers
+accelerate
+
+
