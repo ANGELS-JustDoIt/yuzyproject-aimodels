@@ -1,0 +1,115 @@
+{
+  "frontend": [
+    {
+      "page": "Login",
+      "file": "src/pages/Login.js",
+      "description": "Login Page",
+      "components": [],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/auth/login",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "Register",
+      "file": "src/pages/Register.js",
+      "description": "Register Page",
+      "components": [],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/auth/register",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "TaskList",
+      "file": "src/pages/TaskList.js",
+      "description": "View all tasks",
+      "components": ["Navbar", "TaskItem"],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks",
+          "trigger": "useEffect"
+        }
+      ]
+    },
+    {
+      "page": "TaskDetail",
+      "file": "src/pages/TaskDetail.js",
+      "description": "View and manage a specific task",
+      "components": [
+        "Navbar",
+        "TaskHeader",
+        "TaskDescription",
+        "TaskStatus",
+        "TaskPriority",
+        "TaskAssignee",
+        "TaskDueDate",
+        "TaskActions"
+      ],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks/:id",
+          "trigger": "useEffect"
+        },
+        {
+          "method": "POST",
+          "url": "/api/comments/task/:id",
+          "trigger": "handleAddComment"
+        },
+        {
+          "method": "DELETE",
+          "url": "/api/comments/:id",
+          "trigger": "handleDeleteComment"
+        }
+      ]
+    },
+    {
+      "page": "TaskForm",
+      "file": "src/pages/TaskForm.js",
+      "description": "Create or edit a task",
+      "components": [
+        "Navbar",
+        "TaskTitle",
+        "TaskDescription",
+        "TaskStatus",
+        "TaskPriority",
+        "TaskAssignee",
+        "TaskDueDate",
+        "TaskActions"
+      ],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/tasks",
+          "trigger": "handleSubmit"
+        },
+        {
+          "method": "PUT",
+          "url": "/api/tasks/:id",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "MyPage",
+      "file": "src/pages/MyPage.js",
+      "description": "View and manage my tasks",
+      "components": ["Navbar", "TaskList", "TaskItem"],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks?assignee=${user.id}",
+          "trigger": "useEffect"
+        }
+      ]
+    }
+  ]
+}

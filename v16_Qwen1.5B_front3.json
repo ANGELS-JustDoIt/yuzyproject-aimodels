@@ -1,0 +1,120 @@
+{
+  "frontend": [
+    {
+      "page": "Login",
+      "file": "src/pages/Login.js",
+      "description": "Login Page",
+      "components": [],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/auth/login",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "Register",
+      "file": "src/pages/Register.js",
+      "description": "Register Page",
+      "components": [],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/auth/register",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "TaskList",
+      "file": "src/pages/TaskList.js",
+      "description": "View all tasks",
+      "components": [
+        "Navbar",
+        "TaskItem"
+      ],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks",
+          "trigger": "useEffect"
+        }
+      ]
+    },
+    {
+      "page": "TaskDetail",
+      "file": "src/pages/TaskDetail.js",
+      "description": "View a specific task",
+      "components": [
+        "TaskHeader",
+        "TaskDescription",
+        "TaskAssignee",
+        "TaskDueDate",
+        "TaskStatus",
+        "TaskPriority",
+        "TaskComments"
+      ],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks/:id",
+          "trigger": "useEffect"
+        },
+        {
+          "method": "POST",
+          "url": "/api/comments",
+          "trigger": "handleAddComment"
+        },
+        {
+          "method": "DELETE",
+          "url": "/api/comments/:id",
+          "trigger": "handleDeleteComment"
+        }
+      ]
+    },
+    {
+      "page": "TaskForm",
+      "file": "src/pages/TaskForm.js",
+      "description": "Create or edit a task",
+      "components": [
+        "TaskTitle",
+        "TaskDescription",
+        "TaskStatus",
+        "TaskPriority",
+        "TaskAssignee",
+        "TaskDueDate",
+        "TaskSubmitButton",
+        "CancelButton"
+      ],
+      "apiCalls": [
+        {
+          "method": "POST",
+          "url": "/api/tasks",
+          "trigger": "handleSubmit"
+        },
+        {
+          "method": "PUT",
+          "url": "/api/tasks/:id",
+          "trigger": "handleSubmit"
+        }
+      ]
+    },
+    {
+      "page": "MyPage",
+      "file": "src/pages/MyPage.js",
+      "description": "My page with my tasks",
+      "components": [
+        "MyPageHeader",
+        "MyPageTasks"
+      ],
+      "apiCalls": [
+        {
+          "method": "GET",
+          "url": "/api/tasks?assignee=${user.id}",
+          "trigger": "useEffect"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "api": [
+    {
+      "category": "auth",
+      "categoryName": "Auth Feature",
+      "endpoints": [
+        {
+          "method": "POST",
+          "url": "/auth/signup",
+          "function": "signup",
+          "file": "controller/auth.mjs",
+          "description": "Create a new user account.",
+          "children": [
+            {
+              "function": "createJwtToken",
+              "file": "controller/auth.mjs",
+              "description": "Generate a JWT token for authentication.",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/auth/login",
+          "function": "login",
+          "file": "controller/auth.mjs",
+          "description": "Authenticate a user and generate a JWT token.",
+          "children": [
+            {
+              "function": "createJwtToken",
+              "file": "controller/auth.mjs",
+              "description": "Generate a JWT token for authentication.",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/auth/me",
+          "function": "me",
+          "file": "controller/auth.mjs",
+          "description": "Retrieve user information based on the provided JWT token.",
+          "children": []
+        }
+      ]
+    },
+    {
+      "category": "post",
+      "categoryName": "Post Feature",
+      "endpoints": [
+        {
+          "method": "GET",
+          "url": "/post",
+          "function": "getPosts",
+          "file": "controller/post.mjs",
+          "description": "Fetch all posts or posts by a specific user.",
+          "children": []
+        },
+        {
+          "method": "GET",
+          "url": "/post/:id",
+          "function": "getPost",
+          "file": "controller/post.mjs",
+          "description": "Fetch a single post by its ID.",
+          "children": []
+        },
+        {
+          "method": "POST",
+          "url": "/post/",
+          "function": "createPost",
+          "file": "controller/post.mjs",
+          "description": "Create a new post.",
+          "children": []
+        },
+        {
+          "method": "PUT",
+          "url": "/post/:id",
+          "function": "updatePost",
+          "file": "controller/post.mjs",
+          "description": "Update an existing post.",
+          "children": []
+        },
+        {
+          "method": "DELETE",
+          "url": "/post/:id",
+          "function": "deletePost",
+          "file": "controller/post.mjs",
+          "description": "Delete a post.",
+          "children": []
+        }
+      ]
+    }
+  ]
+}

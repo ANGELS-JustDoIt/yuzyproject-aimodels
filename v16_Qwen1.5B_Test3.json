@@ -14,27 +14,26 @@
             {
               "function": "validateSignup",
               "file": "router/auth.mjs",
-              "description": "Validation Chain",
-              "children": []
-            },
-            {
-              "function": "bcrypt.hashSync",
-              "file": "controller/auth.mjs",
-              "description": "Password Hashing",
+              "description": "Validation",
               "children": []
             },
             {
               "function": "createUser",
               "file": "data/auth.mjs",
-              "description": "Save to DB",
-              "children": [
-                {
-                  "function": "User.save()",
-                  "file": "mongoose",
-                  "description": "MongoDB Insert",
-                  "children": []
-                }
-              ]
+              "description": "Create User",
+              "children": []
+            },
+            {
+              "function": "bcrypt.hashSync",
+              "file": "controller/auth.mjs",
+              "description": "Hash Password",
+              "children": []
+            },
+            {
+              "function": "createJwtToken",
+              "file": "controller/auth.mjs",
+              "description": "Create Token",
+              "children": []
             }
           ]
         },
@@ -48,46 +47,46 @@
             {
               "function": "validateLogin",
               "file": "router/auth.mjs",
-              "description": "Validation Chain",
+              "description": "Validation",
+              "children": []
+            },
+            {
+              "function": "findByUserid",
+              "file": "data/auth.mjs",
+              "description": "Find User",
               "children": []
             },
             {
               "function": "bcrypt.compare",
               "file": "controller/auth.mjs",
-              "description": "Password Verification",
+              "description": "Check PW",
               "children": []
             },
             {
               "function": "createJwtToken",
               "file": "controller/auth.mjs",
-              "description": "Create JWT Token",
-              "children": []
-            },
-            {
-              "function": "res.status(200).json({ token, userid })",
-              "file": "controller/auth.mjs",
-              "description": "Send JWT Token and User ID",
+              "description": "Create Token",
               "children": []
             }
           ]
         },
         {
-          "method": "GET",
+          "method": "POST",
           "url": "/auth/me",
           "function": "me",
           "file": "controller/auth.mjs",
           "description": "Get Current User Info",
           "children": [
             {
-              "function": "authRepository.findById(req.id)",
+              "function": "findById",
               "file": "data/auth.mjs",
               "description": "Find User by ID",
               "children": []
             },
             {
-              "function": "res.status(200).json({ token, userid })",
+              "function": "createJwtToken",
               "file": "controller/auth.mjs",
-              "description": "Send JWT Token and User ID",
+              "description": "Create Token",
               "children": []
             }
           ]
