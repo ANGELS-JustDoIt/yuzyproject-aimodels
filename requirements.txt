@@ -91,5 +91,6 @@ uvicorn[standard]
 torch
 transformers
 accelerate
+python-multipart
 
 

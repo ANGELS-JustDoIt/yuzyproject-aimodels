@@ -1,0 +1,264 @@
+{
+  "api": [
+    {
+      "category": "auth",
+      "categoryName": "Auth Feature",
+      "endpoints": [
+        {
+          "method": "POST",
+          "url": "/auth/signup",
+          "function": "authController.signup",
+          "children": [
+            {
+              "function": "body validation",
+              "file": "middleware/validator.mjs",
+              "description": "Validation of Signup Request Body",
+              "children": []
+            },
+            {
+              "function": "findByUserid",
+              "file": "data/auth.mjs",
+              "description": "Check for Existing UserID",
+              "children": []
+            },
+            {
+              "function": "bcrypt hash",
+              "file": "bcrypt",
+              "description": "Hash Password",
+              "children": []
+            },
+            {
+              "function": "createUser",
+              "file": "data/auth.mjs",
+              "description": "Create New User",
+              "children": []
+            },
+            {
+              "function": "createJwtToken",
+              "file": "middleware/auth.mjs",
+              "description": "Generate JWT Token",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send JWT Token and User ID",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/auth/login",
+          "function": "authController.login",
+          "children": [
+            {
+              "function": "body validation",
+              "file": "middleware/validator.mjs",
+              "description": "Validation of Login Request Body",
+              "children": []
+            },
+            {
+              "function": "findByUserid",
+              "file": "data/auth.mjs",
+              "description": "Check for Existing UserID",
+              "children": []
+            },
+            {
+              "function": "bcrypt compare",
+              "file": "bcrypt",
+              "description": "Compare Passwords",
+              "children": []
+            },
+            {
+              "function": "createJwtToken",
+              "file": "middleware/auth.mjs",
+              "description": "Generate JWT Token",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send JWT Token",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/auth/me",
+          "function": "authController.me",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "findById",
+              "file": "data/auth.mjs",
+              "description": "Find User by ID",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send User Information",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "category": "post",
+      "categoryName": "Post Feature",
+      "endpoints": [
+        {
+          "method": "GET",
+          "url": "/post",
+          "function": "postController.getPosts",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "getAllByUserid",
+              "file": "data/post.mjs",
+              "description": "Get Posts by User ID",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send Posts",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "url": "/post/:id",
+          "function": "postController.getPost",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "getById",
+              "file": "data/post.mjs",
+              "description": "Get Post by ID",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send Post",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "POST",
+          "url": "/post/",
+          "function": "postController.createPost",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "validatePost",
+              "file": "middleware/validator.mjs",
+              "description": "Validation of Post Request Body",
+              "children": []
+            },
+            {
+              "function": "create",
+              "file": "data/post.mjs",
+              "description": "Create Post",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send Created Post",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "PUT",
+          "url": "/post/:id",
+          "function": "postController.updatePost",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "validatePost",
+              "file": "middleware/validator.mjs",
+              "description": "Validation of Post Request Body",
+              "children": []
+            },
+            {
+              "function": "update",
+              "file": "data/post.mjs",
+              "description": "Update Post",
+              "children": []
+            },
+            {
+              "function": "res.send",
+              "file": "app.mjs",
+              "description": "Send Updated Post",
+              "children": []
+            }
+          ]
+        },
+        {
+          "method": "DELETE",
+          "url": "/post/:id",
+          "function": "postController.deletePost",
+          "children": [
+            {
+              "function": "isAuth",
+              "file": "middleware/auth.mjs",
+              "description": "Authentication Check",
+              "children": []
+            },
+            {
+              "function": "getById",
+              "file": "data/post.mjs",
+              "description": "Get Post by ID",
+              "children": []
+            },
+            {
+              "function": "remove",
+              "file": "data/post.mjs",
+              "description": "Remove Post",
+              "children": []
+            },
+            {
+              "function": "res.sendStatus",
+              "file": "app.mjs",
+              "description": "Send Status Code",
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
