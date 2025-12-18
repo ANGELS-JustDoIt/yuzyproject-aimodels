@@ -8,3 +8,5 @@ server/
 project_full_context_2.txt
 
 test/
+debug_outputs/
+outputs/

@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
+from pydantic import BaseModel
 
 from core.analyzer import (
     AnalyzerConfig,
@@ -16,6 +18,20 @@ from core.analyzer import (
 )
 
 app = FastAPI(title="TaskFlow Analyzer", version="1.0.0")
+
+# CORS 설정: 프론트엔드(Next.js)에서 호출할 수 있도록 허용
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -34,6 +50,11 @@ def health():
 
 def _read_text_file_safe(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
+
+
+class VisualizeRequest(BaseModel):
+    # 프론트엔드에서 보내는 통합 코드 텍스트
+    code: str
 
 
 @app.post("/analyze")
@@ -66,9 +87,8 @@ async def analyze(
     cfg = AnalyzerConfig(
         max_total_lines=2000,
         max_total_chars=50_000,
-        max_time_seconds=200,
         max_new_tokens=4096,
-        repetition_penalty=1.1
+        repetition_penalty=1.1,
     )
 
     # ---- Pass A / Pass B ----
@@ -80,6 +100,37 @@ async def analyze(
         "analysis": analysis,
         "explain": explain,
     })
+
+
+@app.post("/visualize")
+async def visualize(req: VisualizeRequest):
+    """
+    Next.js 프론트엔드에서 사용하는 엔드포인트.
+    - URL: POST /visualize
+    - Body(JSON): { "code": "<프로젝트 전체 코드 텍스트>" }
+
+    반환 형식은 프론트에서 기대하는 것처럼 최상단에 `api` 배열이 오는 JSON입니다.
+    """
+    if not req.code.strip():
+        raise HTTPException(status_code=400, detail="code 필드는 비어 있을 수 없습니다.")
+
+    # outputs 디렉터리 하위에 요청별 결과 저장 (analyze와 동일한 구조)
+    request_id = str(uuid.uuid4())
+    out_dir = OUTPUTS_DIR / request_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = AnalyzerConfig(
+        max_total_lines=2000,
+        max_total_chars=50_000,
+        max_new_tokens=4096,
+        repetition_penalty=1.1,
+    )
+
+    analysis = analyze_from_text(req.code, out_dir=str(out_dir), cfg=cfg)
+
+    # 프론트는 analysisResult.api 를 기대하므로,
+    # LLM이 만든 JSON을 그대로 반환 (이미 "api" 필드를 포함하고 있어야 함)
+    return JSONResponse(content=analysis)
 
 
 @app.get("/result/{request_id}/code", response_class=PlainTextResponse)
