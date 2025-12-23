@@ -818,7 +818,8 @@ def select_roi_auto(image: np.ndarray, window_name: str = "Select ROI") -> np.nd
             if drawing:
                 end_point = (x, y)
                 img_copy = image.copy()
-                cv2.rectangle(img_copy, start_point, end_point, (0, 255, 0), 2)
+                # 프로젝트 웹에서 사용하는 청록색(#7DE2D1)에 맞춘 BGR 색상
+                cv2.rectangle(img_copy, start_point, end_point, (209, 226, 125), 2)
                 cv2.imshow(window_name, img_copy)
         elif event == cv2.EVENT_LBUTTONUP:
             if drawing:
