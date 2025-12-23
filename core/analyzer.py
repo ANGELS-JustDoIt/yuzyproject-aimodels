@@ -431,7 +431,7 @@ def load_model_once():
     _MODEL = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         device_map="auto",
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         trust_remote_code=True,
     )
     if _TOKENIZER.pad_token is None:

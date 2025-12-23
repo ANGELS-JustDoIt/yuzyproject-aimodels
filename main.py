@@ -16,6 +16,7 @@ from core.analyzer import (
     INPUT_FILE,
     OUTPUT_JSON,
 )
+from core.capture import capture_and_ocr
 
 app = FastAPI(title="TaskFlow Analyzer", version="1.0.0")
 
@@ -155,6 +156,24 @@ def get_explain(request_id: str):
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"{p} not found")
     return JSONResponse(content=json_load_safe(_read_text_file_safe(p)))
+
+
+@app.post("/capture")
+def capture():
+    """
+    화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
+    
+    Returns:
+        JSONResponse: {
+            "success": bool,
+            "text": str (OCR 결과),
+            "method": str (사용된 OCR 방법),
+            "error": str (에러 메시지, 실패 시)
+        }
+    """
+    result = capture_and_ocr()
+    return JSONResponse(content=result)
+
 
 def json_load_safe(text: str):
     import json
