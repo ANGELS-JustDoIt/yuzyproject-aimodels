@@ -87,7 +87,7 @@ async def analyze(
     cfg = AnalyzerConfig(
         max_total_lines=2000,
         max_total_chars=50_000,
-        max_new_tokens=4096,
+        max_new_tokens=16384,  # 모든 API 엔드포인트를 포함하기 위해 충분히 큰 값
         repetition_penalty=1.1,
     )
 
@@ -122,7 +122,7 @@ async def visualize(req: VisualizeRequest):
     cfg = AnalyzerConfig(
         max_total_lines=2000,
         max_total_chars=50_000,
-        max_new_tokens=4096,
+        max_new_tokens=16384,  # 모든 API 엔드포인트를 포함하기 위해 충분히 큰 값
         repetition_penalty=1.1,
     )
 
