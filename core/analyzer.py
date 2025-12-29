@@ -443,6 +443,84 @@ def load_model_once():
     return _TOKENIZER, _MODEL
 
 
+def _fix_control_chars_in_json_strings(json_str: str) -> str:
+    """
+    Fix unescaped control characters (\\n, \\r, \\t, etc.) inside JSON string values.
+    Uses a state machine to properly handle escaped sequences and string boundaries.
+    """
+    result = []
+    i = 0
+    in_string = False
+    escape_count = 0  # Count consecutive backslashes
+    
+    while i < len(json_str):
+        char = json_str[i]
+        
+        if char == '\\':
+            # Count consecutive backslashes
+            escape_count += 1
+            result.append(char)
+            i += 1
+            continue
+        
+        # Reset escape count if we encounter a non-backslash character
+        if escape_count > 0:
+            # Previous characters were backslashes
+            if char in ['n', 'r', 't', '"', '\\', '/', 'b', 'f', 'u']:
+                # Valid escape sequence, keep as is
+                result.append(char)
+                escape_count = 0
+                i += 1
+                continue
+            else:
+                # Invalid escape sequence - this shouldn't happen in valid JSON
+                # But we'll handle it by resetting escape count
+                escape_count = 0
+        
+        if char == '"':
+            # Check if this quote is escaped (odd number of backslashes before it)
+            # We need to look back at the result to count backslashes
+            backslash_count = 0
+            j = len(result) - 1
+            while j >= 0 and result[j] == '\\':
+                backslash_count += 1
+                j -= 1
+            
+            if backslash_count % 2 == 1:
+                # This quote is escaped, don't toggle string state
+                result.append(char)
+                i += 1
+                continue
+            
+            # Toggle string state
+            in_string = not in_string
+            result.append(char)
+            i += 1
+            continue
+        
+        if in_string:
+            # Inside a string value
+            # Check for unescaped control characters
+            if char == '\n':
+                result.append('\\n')
+            elif char == '\r':
+                result.append('\\r')
+            elif char == '\t':
+                result.append('\\t')
+            elif ord(char) < 32:  # Other control characters (0x00-0x1F)
+                # Escape other control characters as unicode
+                result.append(f'\\u{ord(char):04x}')
+            else:
+                result.append(char)
+        else:
+            # Outside string, keep as is
+            result.append(char)
+        
+        i += 1
+    
+    return ''.join(result)
+
+
 def _fix_unescaped_quotes_in_strings(json_str: str) -> str:
     """
     Fix unescaped quotes inside JSON string values using a more robust approach.
@@ -493,10 +571,13 @@ def _extract_json(text: str) -> str:
     json_str = cleaned[start : end + 1]
     
     # Try to fix common JSON issues
-    # 1. Remove trailing commas before closing brackets/braces (more aggressive)
+    # 1. Fix control characters first (most critical)
+    json_str = _fix_control_chars_in_json_strings(json_str)
+    
+    # 2. Remove trailing commas before closing brackets/braces (more aggressive)
     json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
     
-    # 2. Try to parse first
+    # 3. Try to parse first
     try:
         json.loads(json_str)
         return json_str
@@ -725,6 +806,10 @@ def analyze_from_text(
                 try:
                     # Try to fix the JSON with more aggressive fixes
                     json_str = _extract_json(raw)
+                    
+                    # Fix control characters first (critical for JSON parsing)
+                    json_str = _fix_control_chars_in_json_strings(json_str)
+                    
                     # Remove trailing commas more aggressively
                     json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
                     
