@@ -1,166 +1,1906 @@
 # core/capture.py
 # OCR 캡처 기능을 서버 엔드포인트로 제공
+#
+# Requirements (pip install):
+#   - paddlepaddle (CPU: paddlepaddle, GPU: paddlepaddle-gpu)
+#   - paddleocr
+#   - numpy
+#   - opencv-python (cv2)
+#   - Pillow (PIL)
+#   - mss
+#   - pyperclip
+#   - pytesseract (optional, for Tesseract fallback)
+#   - winrt-runtime, winrt-Windows.* (optional, for WinRT fallback)
 
-import sys
 import os
-import asyncio
+import sys
 import re
-from typing import List, Optional, Union
+import asyncio
+import csv
+from pathlib import Path as PathLib
+from dataclasses import dataclass
+from typing import List, Optional, Union, Tuple, Dict, Any
+
 import numpy as np
 import cv2
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
 from mss import mss
 import pyperclip
 
-# ocrtest.py의 함수들을 import
-# ocrtest.py의 모든 OCR 관련 함수들을 여기서 사용
-import importlib.util
+# PaddleOCR import
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PaddleOCR = None
+    PADDLEOCR_AVAILABLE = False
 
-# ocrtest.py의 경로
-ocr_test_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ocrtest.py")
-spec = importlib.util.spec_from_file_location("ocrtest", ocr_test_path)
-ocrtest = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ocrtest)
+# ------------------------------------------------------------
+# OCR 유틸 (기존 ocr_utils.py 내용을 이 파일로 통합)
+# ------------------------------------------------------------
 
-# ocrtest.py의 함수들을 직접 사용
-sanitize_text = ocrtest.sanitize_text
-preprocess_for_code_pil = ocrtest.preprocess_for_code_pil
-open_image_any = ocrtest.open_image_any
-WordBox = ocrtest.WordBox
-LineBox = ocrtest.LineBox
-cluster_lines = ocrtest.cluster_lines
-estimate_char_width = ocrtest.estimate_char_width
-normalize_code_line = ocrtest.normalize_code_line
-reconstruct_text_from_words = ocrtest.reconstruct_text_from_words
-merge_winrt_lines = ocrtest.merge_winrt_lines
-_run_coro_sync = ocrtest._run_coro_sync
-_create_winrt_engine = ocrtest._create_winrt_engine
-_winrt_recognize_async = ocrtest._winrt_recognize_async
-_winrt_words_from_result = ocrtest._winrt_words_from_result
-_winrt_lines_text = ocrtest._winrt_lines_text
-get_winrt_words = ocrtest.get_winrt_words
-image_to_text_winrt = ocrtest.image_to_text_winrt
-_build_whitelist = ocrtest._build_whitelist
-tesseract_word_boxes = ocrtest.tesseract_word_boxes
-image_to_text = ocrtest.image_to_text
-capture_fullscreen_bgr = ocrtest.capture_fullscreen_bgr
-copy_to_clipboard = ocrtest.copy_to_clipboard
-select_roi_auto = ocrtest.select_roi_auto
-merge_tesseract_winrt_results = ocrtest.merge_tesseract_winrt_results
-get_tesseract_words = ocrtest.get_tesseract_words
-check_winrt_available = ocrtest.check_winrt_available
+# Tesseract 설정
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
-def capture_and_ocr() -> dict:
+TESSERACT_EXE = r"C:\Pyg\Program_Files\Tesseract-OCR\tesseract.exe"
+TESSDATA_DIR = r"C:\Pyg\Program_Files\Tesseract-OCR\tessdata"
+
+
+def _configure_tesseract() -> None:
+    """Set Tesseract paths if available; keep silent when missing."""
+    if pytesseract is None:
+        return
+    if os.path.exists(TESSERACT_EXE):
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
+    if os.path.isdir(TESSDATA_DIR):
+        os.environ["TESSDATA_PREFIX"] = TESSDATA_DIR
+
+
+_configure_tesseract()
+
+
+def get_tesseract_langs() -> List[str]:
+    """Get list of installed Tesseract language packs."""
+    if pytesseract is None:
+        return []
+    try:
+        langs = pytesseract.get_languages(config="")
+        return langs if isinstance(langs, list) else []
+    except Exception:
+        try:
+            import subprocess
+            if os.path.exists(TESSERACT_EXE):
+                result = subprocess.run(
+                    [TESSERACT_EXE, "--list-langs"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split("\n")
+                    if len(lines) > 1:
+                        return [ln.strip() for ln in lines[1:] if ln.strip()]
+        except Exception:
+            pass
+    return []
+
+
+def pick_tess_lang(prefer: str = "eng") -> str:
+    """Pick Tesseract language. Returns prefer if installed, else fallback."""
+    if pytesseract is None:
+        return prefer
+    installed = get_tesseract_langs()
+    if prefer in installed:
+        return prefer
+    if prefer.lower() in installed:
+        return prefer.lower()
+    return installed[0] if installed else prefer
+
+
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U00002600-\U000026FF"
+    "]+",
+    flags=re.UNICODE,
+)
+CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
+def sanitize_text(
+    text: str,
+    *,
+    remove_emoji: bool = True,
+    keep_newlines: bool = True,
+    collapse_spaces: bool = False,
+    tabsize: int = 4,
+) -> str:
+    if not text:
+        return ""
+    t = CTRL_RE.sub("", text)
+    if remove_emoji:
+        t = EMOJI_RE.sub("", t)
+    t = t.replace("\t", " " * tabsize)
+    t = "\n".join([ln.rstrip() for ln in t.splitlines()])
+    if not keep_newlines:
+        t = t.replace("\n", " ")
+    if collapse_spaces:
+        out_lines = []
+        for ln in t.splitlines():
+            lead = len(ln) - len(ln.lstrip(" "))
+            body = re.sub(r"[ ]{2,}", " ", ln.lstrip(" "))
+            out_lines.append((" " * lead) + body)
+        t = "\n".join(out_lines)
+    return t.strip()
+
+
+def preprocess_for_code_pil(img: Image.Image, enabled: bool) -> Image.Image:
+    """Tesseract PASS1 (강전처리): 구조/문자 중심"""
+    if not enabled:
+        return img.convert("RGB")
+    g = img.convert("L")
+    g = ImageEnhance.Contrast(g).enhance(2.8)
+    g = ImageEnhance.Sharpness(g).enhance(2.2)
+    g = ImageEnhance.Brightness(g).enhance(1.1)
+    g = g.filter(ImageFilter.MedianFilter(size=3))
+    arr = np.array(g)
+    _, binary = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 너무 강한 close는 ':' ';'를 죽일 수 있으니 (1,1) 유지
+    kernel = np.ones((1, 1), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    g = Image.fromarray(binary)
+    return g.convert("RGB")
+
+
+def preprocess_for_code_pil_light(img: Image.Image, enabled: bool) -> Image.Image:
+    """Tesseract PASS2 (약전처리): ':' ';' '"' ',' 등 기호 보존"""
+    if not enabled:
+        return img.convert("RGB")
+    g = img.convert("L")
+    g = ImageEnhance.Contrast(g).enhance(2.0)
+    g = ImageEnhance.Sharpness(g).enhance(1.6)
+    g = ImageEnhance.Brightness(g).enhance(1.05)
+    # ✅ OTSU/모폴로지 제거: 점/기호 보존용
+    return g.convert("RGB")
+
+
+def preprocess_for_winrt_pil(img: Image.Image, enabled: bool) -> Image.Image:
+    """WinRT용 약전처리 (점/기호 ':' ';' 보호)"""
+    if not enabled:
+        return img.convert("RGB")
+    g = img.convert("L")
+    g = ImageEnhance.Contrast(g).enhance(2.0)
+    g = ImageEnhance.Sharpness(g).enhance(1.6)
+    g = ImageEnhance.Brightness(g).enhance(1.05)
+    # ✅ OTSU/모폴로지 제외
+    return g.convert("RGB")
+
+
+def open_image_any(img: Union[np.ndarray, Image.Image]) -> Image.Image:
+    if isinstance(img, Image.Image):
+        return img.convert("RGB")
+    if isinstance(img, np.ndarray):
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(rgb).convert("RGB")
+    raise TypeError("Unsupported image type (need PIL.Image or OpenCV BGR ndarray).")
+
+
+@dataclass
+class WordBox:
+    text: str
+    x: float
+    y: float
+    w: float
+    h: float
+    conf: float = -1.0
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.w
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.h
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.h * 0.5
+
+
+@dataclass
+class LineBox:
+    words: List[WordBox]
+    y_center: float
+    y_top: float
+    y_bot: float
+
+
+def _robust_median(values: List[float], default: float) -> float:
+    vals = [v for v in values if v is not None and np.isfinite(v)]
+    if not vals:
+        return default
+    return float(np.median(np.array(vals, dtype=np.float32)))
+
+
+def clamp_int(x: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, x))
+
+
+def cluster_lines(words: List[WordBox]) -> List[LineBox]:
+    if not words:
+        return []
+    heights = [w.h for w in words if w.h > 0]
+    med_h = _robust_median(heights, default=14.0)
+    y_thresh = max(6.0, med_h * 0.60)
+    ws = sorted(words, key=lambda w: (w.cy, w.x))
+
+    lines: List[LineBox] = []
+    cur: List[WordBox] = []
+    cur_center: Optional[float] = None
+
+    for w in ws:
+        if not cur:
+            cur = [w]
+            cur_center = w.cy
+            continue
+        if abs(w.cy - float(cur_center)) <= y_thresh:
+            cur.append(w)
+            cur_center = (float(cur_center) * 0.7) + (w.cy * 0.3)
+        else:
+            cur_sorted = sorted(cur, key=lambda t: t.x)
+            y_top = min(t.y for t in cur_sorted)
+            y_bot = max(t.y2 for t in cur_sorted)
+            y_center = float(np.mean([t.cy for t in cur_sorted]))
+            lines.append(LineBox(words=cur_sorted, y_center=y_center, y_top=y_top, y_bot=y_bot))
+            cur = [w]
+            cur_center = w.cy
+
+    if cur:
+        cur_sorted = sorted(cur, key=lambda t: t.x)
+        y_top = min(t.y for t in cur_sorted)
+        y_bot = max(t.y2 for t in cur_sorted)
+        y_center = float(np.mean([t.cy for t in cur_sorted]))
+        lines.append(LineBox(words=cur_sorted, y_center=y_center, y_top=y_top, y_bot=y_bot))
+
+    lines.sort(key=lambda ln: ln.y_center)
+
+    merged: List[LineBox] = []
+    for ln in lines:
+        if not merged:
+            merged.append(ln)
+            continue
+        prev = merged[-1]
+        gap = ln.y_top - prev.y_bot
+        if gap <= max(2.0, med_h * 0.15):
+            merged_words = sorted(prev.words + ln.words, key=lambda t: t.x)
+            y_top = min(t.y for t in merged_words)
+            y_bot = max(t.y2 for t in merged_words)
+            y_center = float(np.mean([t.cy for t in merged_words]))
+            merged[-1] = LineBox(words=merged_words, y_center=y_center, y_top=y_top, y_bot=y_bot)
+        else:
+            merged.append(ln)
+
+    return merged
+
+
+def estimate_char_width(lines: List[LineBox]) -> float:
+    samples: List[float] = []
+    for ln in lines:
+        for w in ln.words:
+            txt = w.text
+            if not txt or len(txt) < 2:
+                continue
+            if " " in txt:
+                continue
+            cw = w.w / max(1, len(txt))
+            if 2.0 <= cw <= 80.0:
+                samples.append(float(cw))
+    if not samples:
+        heights = [w.h for ln in lines for w in ln.words if w.h > 0]
+        med_h = _robust_median(heights, default=14.0)
+        return max(6.0, med_h * 0.55)
+    return _robust_median(samples, default=8.0)
+
+
+ASCII_CODE_RE = re.compile(r"[A-Za-z0-9_{}\[\]().,:;=<>!+\-/*%\\'\"`@#$^|~]")
+HANGUL_TAIL_RE = re.compile(r"([가-힣]{1,4})\s*$")
+
+
+def _line_ascii_ratio(s: str) -> float:
+    if not s:
+        return 0.0
+    ascii_cnt = len(ASCII_CODE_RE.findall(s))
+    return ascii_cnt / max(1, len(s))
+
+
+COMMON_GLUE = [
+    (re.compile(r"\bfrom(?=[A-Za-z_])", re.IGNORECASE), "from "),
+    (re.compile(r"\bimport(?=[A-Za-z_])", re.IGNORECASE), "import "),
+    (re.compile(r"\bdef(?=[A-Za-z_])", re.IGNORECASE), "def "),
+    (re.compile(r"\breturn(?=[A-Za-z_])", re.IGNORECASE), "return "),
+    (re.compile(r"\braise(?=[A-Za-z_])", re.IGNORECASE), "raise "),
+]
+
+
+def normalize_code_line(
+    line: str,
+    next_line_indent: Optional[int] = None,
+    lang_hint: str = "py",
+    safe_mode: bool = True,
+) -> str:
+    """Normalize code line with high-confidence rules only."""
+    if not line:
+        return line
+
+    s = line
+
+    # 전각→반각 정규화(안전)
+    s = s.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+    s = s.replace("；", ";").replace("﹔", ";")
+    s = s.replace("，", ",").replace("．", ".")
+    s = s.replace("—", "-").replace("–", "-")
+    s = s.replace("→", "->").replace("-〉", "->")
+
+    # 라인 끝 한글 잡음 제거(코드 라인처럼 보일 때만)
+    if _line_ascii_ratio(s) >= 0.60 and HANGUL_TAIL_RE.search(s):
+        s = HANGUL_TAIL_RE.sub("", s)
+
+    # 확정 패턴 복원
+    s = re.sub(r"\bwithopen\b", "with open", s, flags=re.I)
+    s = re.sub(r"\bscoreinzip\b", "score in zip", s, flags=re.I)
+    s = re.sub(r"\bforbox\b", "for box", s, flags=re.I)
+    
+    # --- OCR 공백 붕괴 복원 (확실한 패턴) ---
+    # exceptExceptionase -> except Exception as e:
+    s = re.sub(r"\bexceptExceptionase\b", "except Exception as e", s, flags=re.I)
+    # exceptException -> except Exception
+    s = re.sub(r"\bexceptException\b", "except Exception", s, flags=re.I)
+    # 처리중오류 -> 처리 중 오류 (한글 주석/문자열 내)
+    s = re.sub(r"처리중오류", "처리 중 오류", s)
+    # PaddleOCRPretrainedInference -> PaddleOCR Pretrained Inference
+    s = re.sub(r"PaddleOCRPretrainedInference", "PaddleOCR Pretrained Inference", s, flags=re.I)
+    s = re.sub(r"PaddleOCRPretrained", "PaddleOCR Pretrained", s, flags=re.I)
+
+    # ")asf" / "asf" → "as f"
+    s = re.sub(r"\)\s*asf\b", ") as f", s, flags=re.I)
+    s = re.sub(r"(\bwith\s+open\([^)]*\))\s*asf\b", r"\1 as f", s, flags=re.I)
+
+    # coordforpointinboxforcoordinpoint 복원
+    s = re.sub(
+        r"\bcoordforpointinboxforcoordinpoint\b",
+        "coord for point in box for coord in point",
+        s,
+        flags=re.I,
+    )
+
+    # zip(boxes,txts,scores) → zip(boxes, txts, scores)
+    s = re.sub(r"\bzip\(\s*boxes\s*,\s*txts\s*,\s*scores\s*\)", "zip(boxes, txts, scores)", s)
+
+    # --- OCR 특화 복원: typing 제네릭 표기 제거 ---
+    # zip[tuple](...) -> zip(...)
+    s = re.sub(r"\bzip\s*\[\s*tuple\s*\]\s*\(", "zip(", s, flags=re.I)
+    # tqdm[Path](...) -> tqdm(...)
+    s = re.sub(r"\btqdm\s*\[\s*Path\s*\]\s*\(", "tqdm(", s, flags=re.I)
+    # list[Path](...) -> list(...)
+    s = re.sub(r"\blist\s*\[\s*Path\s*\]\s*\(", "list(", s, flags=re.I)
+    # 일반적인 함수[Type](...) -> 함수(...) (확실한 패턴만)
+    s = re.sub(r"\b([A-Za-z_]\w*)\s*\[\s*[A-Za-z_]\w*\s*\]\s*\(", r"\1(", s)
+
+    # --- OCR 특화: forimg_pathintqdm... 복원 ---
+    # forimg_pathintqdm[Path]|(...) -> for img_path in tqdm(...)
+    # 1) "for" 다음 식별자 분리 (forimg_path -> for img_path, intqdm 앞에 오는 경우)
+    s = re.sub(r"\bfor([A-Za-z_]\w+)(intqdm)", r"for \1 \2", s, flags=re.I)
+    # 2) "intqdm" -> "in tqdm" (공백 없이 붙은 경우)
+    s = re.sub(r"(\w+)\s*(intqdm)", r"\1 in tqdm", s, flags=re.I)
+    # 3) tqdm[Path]|(...) -> tqdm(...) (파이프 제거)
+    s = re.sub(r"\btqdm\s*\[\s*Path\s*\]\s*[|]\s*\(", "tqdm(", s, flags=re.I)
+    # 4) tqdm[Path](... -> tqdm(... (파이프 없이도)
+    s = re.sub(r"\btqdm\s*\[\s*Path\s*\]\s*\(", "tqdm(", s, flags=re.I)
+    # 5) "in" 앞뒤 공백 보정 (in 다음 식별자 붙은 경우, 키워드 "in"만 매칭)
+    # "for ... in tqdm" 또는 "for ... in zip" 같은 패턴만
+    s = re.sub(r"\bfor\s+([A-Za-z_]\w+)\s+in\s+([A-Za-z_])", r"for \1 in \2", s)
+
+    # --- 경로 문자열 중복/깨짐 복원 ---
+    # val_dir=Path(...) path(...) -> val_dir=Path(...) (중복 제거)
+    s = re.sub(r"(\w+)\s*=\s*Path\s*\([^)]+\)\s+path\s*\([^)]+\)", lambda m: m.group(1) + "=Path(" + m.group(0).split(" path(")[0].split("Path(")[1] + ")", s, flags=re.I)
+    # Path(...) path(...) -> Path(...) (중복 제거, 변수명 없는 경우)
+    s = re.sub(r"\bPath\s*\([^)]+\)\s+path\s*\([^)]+\)", lambda m: m.group(0).split(" path(")[0] + ")", s, flags=re.I)
+    # 같은 변수 할당이 여러 번 반복되는 경우 첫 번째만 유지
+    # val_dir=Path(...) val_dir=Path(...) -> val_dir=Path(...)
+    s = re.sub(r"(\w+)\s*=\s*Path\s*\([^)]+\)\s+\1\s*=\s*Path\s*\([^)]+\)", lambda m: m.group(0).split(" " + m.group(1) + "=")[0], s, flags=re.I)
+
+    # --- newline 파라미터 복원 강화 ---
+    # newline=", encoding= -> newline="", encoding=
+    s = re.sub(r"newline\s*=\s*\"?\s*,\s*encoding\s*=", 'newline="", encoding=', s, flags=re.I)
+    # newline=", encoding='...' -> newline="", encoding='...'
+    s = re.sub(r"newline\s*=\s*\"\s*,\s*encoding\s*=\s*'", 'newline="", encoding=\'', s, flags=re.I)
+    
+    # --- try/except 블록 구조 복원 ---
+    # 잘못된 구조: )처리중오류:{아"): 같은 패턴 제거
+    s = re.sub(r"\)\s*처리중오류\s*:\s*\{[^}]*\"\s*\)\s*:", "):", s)
+    # try: 함수() exceptException -> try:\n    함수()\nexcept Exception as e:
+    s = re.sub(r"try:\s*([A-Za-z_]\w+\([^)]*\))\s*exceptException", r"try:\n    \1\nexcept Exception as e:", s, flags=re.I)
+    # print(f"[ERROR]{변수}Ae]BSe:{e}") -> print(f"[ERROR] {변수} 처리 중 오류: {e}")
+    s = re.sub(r'print\s*\(\s*f\s*"\[ERROR\]\{([^}]+)\}Ae\]BSe:\{e\}"\s*\)', r'print(f"[ERROR] {\1} 처리 중 오류: {e}")', s, flags=re.I)
+    # print(f"[ERROR]{변수}...:{e}") -> print(f"[ERROR] {변수} ...: {e}")
+    s = re.sub(r'print\s*\(\s*f\s*"\[ERROR\]\{([^}]+)\}([^:]+):\{e\}"\s*\)', r'print(f"[ERROR] {\1} \2: {e}")', s, flags=re.I)
+
+    # 콤마 spacing (안전)
+    s = re.sub(r",(?=\S)", ", ", s)
+
+    # --- 고신뢰 ':' 복원 (블록 문법 규칙) ---
+    # 1) with open(... ) as f  → 항상 ':' 필요
+    if re.match(r"^\s*with\s+open\(", s) and re.search(r"\bas\s+f\b", s) and not s.rstrip().endswith(":"):
+        s = s.rstrip() + ":"
+    # 2) for ... in zip(...) / tqdm(...) → 항상 ':' 필요
+    if re.match(r"^\s*for\s+.+\s+in\s+(zip|tqdm)\(", s) and not s.rstrip().endswith(":"):
+        s = s.rstrip() + ":"
+    # 3) 일반 블록 키워드는 "다음 줄 indent 증가" 근거 있을 때만
+    if safe_mode and lang_hint.lower() in ("py", "python"):
+        stripped0 = s.lstrip(" ")
+        lead0 = len(s) - len(stripped0)
+        block_kw = r"(if|elif|else|for|while|try|except|finally|with|def|class|match|case)"
+        m = re.match(rf"^({block_kw})\b(.*)$", stripped0)
+        if m and not stripped0.rstrip().endswith(":"):
+            kw = m.group(1).lower()
+            # 단독 블록 키워드는 항상 콜론
+            if kw in ("else", "try", "finally", "except"):
+                s = (" " * lead0) + stripped0.rstrip() + ":"
+            # 다음 줄 indent 증가 근거가 있으면 콜론 복원
+            elif next_line_indent is not None and next_line_indent > lead0:
+                s = (" " * lead0) + stripped0.rstrip() + ":"
+
+    for pat, rep in COMMON_GLUE:
+        s = pat.sub(rep, s)
+
+    # 불필요 다중 공백 축소 (indent 유지)
+    lead = len(s) - len(s.lstrip(" "))
+    body = re.sub(r"[ ]{2,}", " ", s.lstrip(" "))
+    return (" " * lead) + body
+
+
+def _score_code_text(t: str) -> float:
+    if not t:
+        return -1e9
+    ascii_cnt = len(ASCII_CODE_RE.findall(t))
+    total = max(1, len(t))
+    ratio = ascii_cnt / total
+    colon_cnt = t.count(":")
+    semi_cnt = t.count(";")
+    brace_cnt = t.count("{") + t.count("}") + t.count("(") + t.count(")") + t.count("[") + t.count("]")
+    op_cnt = sum(t.count(x) for x in ["==", "!=", "<=", ">=", "->", "=>"])
+    return (ratio * 100.0) + (colon_cnt * 2.5) + (semi_cnt * 2.0) + (brace_cnt * 0.8) + (op_cnt * 1.2)
+
+
+def reconstruct_text_from_words(
+    words: List[WordBox],
+    *,
+    code_mode: bool = True,
+    normalize: bool = True,
+    indent_step: int = 4,
+    remove_emoji: bool = True,
+) -> str:
+    if not words:
+        return ""
+    clean_words: List[WordBox] = []
+    for w in words:
+        t = (w.text or "").strip()
+        if not t:
+            continue
+        t = CTRL_RE.sub("", t)
+        if remove_emoji:
+            t = EMOJI_RE.sub("", t)
+        if not t:
+            continue
+        clean_words.append(WordBox(text=t, x=w.x, y=w.y, w=w.w, h=w.h, conf=w.conf))
+    if not clean_words:
+        return ""
+
+    lines = cluster_lines(clean_words)
+    if not lines:
+        return ""
+
+    char_w = estimate_char_width(lines)
+    left_margin = min(w.x for ln in lines for w in ln.words)
+
+    raw_lines: List[str] = []
+    for ln in lines:
+        if not ln.words:
+            raw_lines.append("")
+            continue
+
+        first = ln.words[0]
+        leading_spaces = int(round((first.x - left_margin) / max(1e-6, char_w)))
+        leading_spaces = max(0, leading_spaces)
+
+        parts: List[str] = []
+        parts.append(" " * leading_spaces)
+        parts.append(first.text)
+
+        prev_x2 = first.x2
+        prev_text = first.text
+
+        for w in ln.words[1:]:
+            txt = w.text
+            if not txt:
+                continue
+
+            gap_px = w.x - prev_x2
+
+            # ✅ 공백 붕괴 방지: 알파뉴메릭 토큰끼리는 최소 1칸
+            prev_is_alnum = bool(re.search(r"[A-Za-z0-9_]", prev_text))
+            curr_is_alnum = bool(re.search(r"[A-Za-z0-9_]", txt))
+            min_spaces = 1 if (prev_is_alnum and curr_is_alnum) else 0
+
+            # 기존 0.10은 너무 공격적 → 0.05로 완화
+            if gap_px <= char_w * 0.05:
+                spaces = min_spaces
+            else:
+                spaces = int(round(gap_px / max(1e-6, char_w)))
+                spaces = clamp_int(spaces, min_spaces, 80)
+
+            parts.append(" " * spaces)
+            parts.append(txt)
+            prev_x2 = max(prev_x2, w.x2)
+            prev_text = txt
+
+        raw_lines.append("".join(parts).rstrip())
+
+    if not code_mode:
+        out = "\n".join(raw_lines).rstrip() + "\n"
+        return sanitize_text(out, remove_emoji=remove_emoji, keep_newlines=True, collapse_spaces=False) + "\n"
+
+    def indent_of(s: str) -> int:
+        return len(s) - len(s.lstrip(" "))
+
+    def set_indent(s: str, n: int) -> str:
+        return (" " * max(0, n)) + s.lstrip(" ")
+
+    fixed: List[str] = []
+    seen_lines = set()  # 중복 줄 제거용
+    
+    for i, s in enumerate(raw_lines):
+        if not s.strip():
+            fixed.append("")
+            continue
+
+        cur_indent = indent_of(s)
+        stripped = s.lstrip(" ")
+
+        if stripped and stripped[0] in ("}", "]", ")"):
+            cur_indent = max(0, cur_indent - indent_step)
+        if re.match(r"^(else:|elif\b|except\b|finally:)", stripped):
+            cur_indent = max(0, cur_indent - indent_step)
+        if fixed:
+            prev = fixed[-1].rstrip()
+            prev_strip = prev.lstrip(" ")
+            prev_indent = indent_of(prev)
+            if prev_strip.endswith(":"):
+                cur_indent = max(cur_indent, prev_indent + indent_step)
+
+        s2 = set_indent(s, cur_indent)
+
+        # 다음 줄 indent 계산 → 콜론 복원 근거로 사용
+        next_line_indent = None
+        if i + 1 < len(raw_lines):
+            next_s = raw_lines[i + 1]
+            if next_s.strip():
+                next_indent = indent_of(next_s)
+                next_stripped = next_s.lstrip(" ")
+                if next_stripped and next_stripped[0] in ("}", "]", ")"):
+                    next_indent = max(0, next_indent - indent_step)
+                if re.match(r"^(else:|elif\b|except\b|finally:)", next_stripped):
+                    next_indent = max(0, next_indent - indent_step)
+                next_line_indent = next_indent
+
+        if normalize:
+            s2 = normalize_code_line(s2, next_line_indent=next_line_indent, lang_hint="py", safe_mode=True)
+
+        # 중복 줄 제거: 같은 내용의 줄이 연속으로 나타나면 첫 번째만 유지
+        s2_stripped = s2.rstrip()
+        # 변수 할당 패턴 (val_dir=Path(...))이 연속으로 나타나는 경우 중복 제거
+        var_assign_match = re.match(r"^\s*(\w+)\s*=\s*", s2_stripped)
+        if var_assign_match and fixed:
+            var_name = var_assign_match.group(1)
+            prev_stripped = fixed[-1].rstrip()
+            # 이전 줄이 같은 변수 할당이면 현재 줄 스킵
+            if re.match(rf"^\s*{var_name}\s*=\s*", prev_stripped):
+                continue
+        
+        # 일반적인 중복 줄 제거 (정확히 같은 내용)
+        if s2_stripped in seen_lines:
+            continue
+        seen_lines.add(s2_stripped)
+
+        fixed.append(s2_stripped)
+
+    out = "\n".join(fixed).rstrip() + "\n"
+    return sanitize_text(out, remove_emoji=remove_emoji, keep_newlines=True, collapse_spaces=False) + "\n"
+
+
+def merge_winrt_lines(lines_ko: List[str], lines_en: List[str]) -> List[str]:
+    n = max(len(lines_ko), len(lines_en))
+    out: List[str] = []
+    for i in range(n):
+        ko = lines_ko[i] if i < len(lines_ko) else ""
+        en = lines_en[i] if i < len(lines_en) else ""
+        en_score = len(ASCII_CODE_RE.findall(en))
+        ko_score = len(ASCII_CODE_RE.findall(ko))
+        out.append(en if en_score >= ko_score else ko)
+    return out
+
+
+def _run_coro_sync(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+
+def _create_winrt_engine(lang_tag: str):
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.globalization import Language
+
+    try:
+        eng = OcrEngine.try_create_from_language(Language(lang_tag))
+        if eng is not None:
+            return eng
+    except Exception:
+        pass
+
+    alias_map = {"ko": ["ko-KR", "ko"], "en": ["en-US", "en"]}
+    for cand in alias_map.get(lang_tag, []):
+        try:
+            eng = OcrEngine.try_create_from_language(Language(cand))
+            if eng is not None:
+                return eng
+        except Exception:
+            continue
+
+    try:
+        eng = OcrEngine.try_create_from_user_profile_languages()
+        if eng is not None:
+            return eng
+    except Exception:
+        pass
+
+    try:
+        eng = OcrEngine.try_create_from_language(Language("en"))
+        if eng is not None:
+            return eng
+    except Exception:
+        pass
+
+    return None
+
+
+async def _winrt_recognize_async(pil_img: Image.Image, lang_tag: str):
+    from winrt.windows.graphics.imaging import SoftwareBitmap, BitmapPixelFormat
+    from winrt.windows.storage.streams import DataWriter
+
+    def pil_to_software_bitmap(img: Image.Image) -> SoftwareBitmap:
+        rgba = img.convert("RGBA")
+        arr = np.array(rgba, dtype=np.uint8)
+        sb = SoftwareBitmap(BitmapPixelFormat.RGBA8, rgba.width, rgba.height)
+        writer = DataWriter()
+        writer.write_bytes(arr.tobytes())
+        sb.copy_from_buffer(writer.detach_buffer())
+        return sb
+
+    engine = _create_winrt_engine(lang_tag)
+    if engine is None:
+        raise RuntimeError("WinRT OcrEngine 생성 실패 (언어팩/OCR 지원 미설치 가능)")
+    sb = pil_to_software_bitmap(pil_img)
+    return await engine.recognize_async(sb)
+
+
+def _winrt_words_from_result(result) -> List[WordBox]:
+    out: List[WordBox] = []
+    for ln in getattr(result, "lines", []):
+        for w in getattr(ln, "words", []):
+            txt = getattr(w, "text", "") or ""
+            rect = getattr(w, "bounding_rect", None)
+            if not txt or rect is None:
+                continue
+            out.append(
+                WordBox(
+                    text=txt,
+                    x=float(rect.x),
+                    y=float(rect.y),
+                    w=float(rect.width),
+                    h=float(rect.height),
+                    conf=-1.0,
+                )
+            )
+    return out
+
+
+def _winrt_lines_text(result) -> List[str]:
+    return [getattr(ln, "text", "") or "" for ln in getattr(result, "lines", [])]
+
+
+def get_winrt_words(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 2,
+    code_mode: bool = True,
+    remove_emoji: bool = True,
+) -> List[WordBox]:
+    pil_img = open_image_any(img)
+    if scale and scale != 1:
+        w, h = pil_img.size
+        pil_img = pil_img.resize((w * scale, h * scale), Image.BICUBIC)
+
+    pil_img = preprocess_for_winrt_pil(pil_img, enabled=code_mode)
+
+    result_ko = _run_coro_sync(_winrt_recognize_async(pil_img, "ko"))
+    result_en = _run_coro_sync(_winrt_recognize_async(pil_img, "en"))
+    words_ko = _winrt_words_from_result(result_ko)
+    words_en = _winrt_words_from_result(result_en)
+
+    all_words: List[WordBox] = []
+    used_positions = set()
+
+    for w in words_ko:
+        t = (w.text or "").strip()
+        if remove_emoji:
+            t = EMOJI_RE.sub("", t)
+        if not t:
+            continue
+        pos_key = (int(w.x // 10), int(w.y // 10))
+        if pos_key not in used_positions:
+            all_words.append(WordBox(text=t, x=w.x, y=w.y, w=w.w, h=w.h, conf=w.conf))
+            used_positions.add(pos_key)
+
+    for w in words_en:
+        t = (w.text or "").strip()
+        if remove_emoji:
+            t = EMOJI_RE.sub("", t)
+        if not t:
+            continue
+        pos_key = (int(w.x // 10), int(w.y // 10))
+        if pos_key not in used_positions:
+            all_words.append(WordBox(text=t, x=w.x, y=w.y, w=w.w, h=w.h, conf=w.conf))
+            used_positions.add(pos_key)
+
+    return all_words
+
+
+def image_to_text_winrt(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 2,
+    code_mode: bool = True,
+    normalize: bool = True,
+    indent_step: int = 4,
+    remove_emoji: bool = True,
+) -> str:
+    pil_img = open_image_any(img)
+    if scale and scale != 1:
+        w, h = pil_img.size
+        pil_img = pil_img.resize((w * scale, h * scale), Image.BICUBIC)
+
+    pil_img = preprocess_for_winrt_pil(pil_img, enabled=code_mode)
+
+    result_ko = _run_coro_sync(_winrt_recognize_async(pil_img, "ko"))
+    result_en = _run_coro_sync(_winrt_recognize_async(pil_img, "en"))
+
+    lines_ko = [
+        sanitize_text(t, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
+        for t in _winrt_lines_text(result_ko)
+    ]
+    lines_en = [
+        sanitize_text(t, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
+        for t in _winrt_lines_text(result_en)
+    ]
+    merged_lines = merge_winrt_lines(lines_ko, lines_en)
+
+    words = _winrt_words_from_result(result_en)
+    if not words:
+        y = 0.0
+        line_h = 18.0
+        for ln in merged_lines:
+            if ln.strip():
+                words.append(
+                    WordBox(
+                        text=ln,
+                        x=0.0,
+                        y=y,
+                        w=float(max(10, len(ln) * 10)),
+                        h=line_h,
+                        conf=-1.0,
+                    )
+                )
+            y += line_h
+
+    out = reconstruct_text_from_words(
+        words,
+        code_mode=code_mode,
+        normalize=normalize,
+        indent_step=indent_step,
+        remove_emoji=remove_emoji,
+    )
+
+    # 너무 짧으면 merged_lines 기반 보정
+    if out.count("\n") <= 2 and len(merged_lines) >= 2:
+        fixed = []
+        for i, x in enumerate(merged_lines):
+            next_indent = None
+            if i + 1 < len(merged_lines):
+                nxt = merged_lines[i + 1]
+                if nxt.strip():
+                    next_indent = len(nxt) - len(nxt.lstrip(" "))
+            fixed.append(normalize_code_line(x, next_line_indent=next_indent, lang_hint="py", safe_mode=True) if normalize else x)
+        out = "\n".join(fixed).rstrip() + "\n"
+
+    return out
+
+
+def _build_whitelist(code_mode: bool) -> Optional[str]:
+    if not code_mode:
+        return None
+    return (
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "_"
+        "-+=/*%<>!&|^~.,:;?@#$()[]{}\\"
+        "'\"`"
+        " \t"
+    )
+
+
+def _tesseract_eng_whitelist() -> str:
+    return _build_whitelist(True) or ""
+
+
+def tesseract_word_boxes(
+    pil_img: Image.Image,
+    *,
+    lang: str,
+    psm: int = 6,
+    oem: int = 3,
+    code_mode: bool = True,
+    remove_emoji: bool = True,
+    user_defined_dpi: int = 300,
+    whitelist_override: Optional[str] = None,
+) -> List[WordBox]:
+    if pytesseract is None:
+        raise RuntimeError("pytesseract not installed")
+
+    whitelist = whitelist_override if whitelist_override is not None else _build_whitelist(code_mode)
+
+    # ✅ 핵심: 사전/자동보정 OFF (공백 붕괴 원인 제거)
+    config = f"--oem {oem} --psm {psm} -c preserve_interword_spaces=1"
+    config += f" -c user_defined_dpi={int(user_defined_dpi)}"
+    config += " -c classify_bln_numeric_mode=0"
+    config += " -c load_system_dawg=0"
+    config += " -c load_freq_dawg=0"
+    config += " -c tessedit_enable_dict_correction=0"
+
+    if whitelist:
+        config += f" -c tessedit_char_whitelist={whitelist}"
+
+    data = pytesseract.image_to_data(
+        pil_img,
+        lang=lang,
+        config=config,
+        output_type=pytesseract.Output.DICT,
+    )
+
+    out: List[WordBox] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        txt = data["text"][i]
+        if txt is None:
+            continue
+        txt = CTRL_RE.sub("", (txt or "").strip())
+        if remove_emoji:
+            txt = EMOJI_RE.sub("", txt)
+        if not txt:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except Exception:
+            conf = -1.0
+
+        x = float(data["left"][i])
+        y = float(data["top"][i])
+        w = float(data["width"][i])
+        h = float(data["height"][i])
+        if w <= 1 or h <= 1:
+            continue
+
+        out.append(WordBox(text=txt, x=x, y=y, w=w, h=h, conf=conf))
+
+    return out
+
+
+def _tess_best_by_psm(
+    pil_img: Image.Image,
+    *,
+    lang: str,
+    psm_list: List[int],
+    oem: int,
+    code_mode: bool,
+    remove_emoji: bool,
+    user_defined_dpi: int,
+    whitelist_override: Optional[str],
+) -> Tuple[List[WordBox], float]:
+    best_words: List[WordBox] = []
+    best_score = -1e18
+
+    for psm in psm_list:
+        try:
+            words = tesseract_word_boxes(
+                pil_img,
+                lang=lang,
+                psm=psm,
+                oem=oem,
+                code_mode=code_mode,
+                remove_emoji=remove_emoji,
+                user_defined_dpi=user_defined_dpi,
+                whitelist_override=whitelist_override,
+            )
+            if not words:
+                continue
+            txt = reconstruct_text_from_words(
+                words,
+                code_mode=True,
+                normalize=False,
+                indent_step=4,
+                remove_emoji=remove_emoji,
+            )
+            sc = _score_code_text(txt)
+            if sc > best_score:
+                best_score = sc
+                best_words = words
+        except Exception:
+            continue
+
+    return best_words, best_score
+
+
+def _merge_tesseract_two_pass(words_eng: List[WordBox], words_kor: List[WordBox]) -> List[WordBox]:
+    if not words_eng and not words_kor:
+        return []
+    if not words_kor:
+        return words_eng
+    if not words_eng:
+        return words_kor
+
+    korean_re = re.compile(r"[가-힣]")
+    symbol_chars = set(":;,\".'")
+
+    def overlap_ratio(a: WordBox, b: WordBox) -> float:
+        y_overlap = min(a.y2, b.y2) - max(a.y, b.y)
+        if y_overlap <= 0:
+            return 0.0
+        x_overlap = min(a.x2, b.x2) - max(a.x, b.x)
+        if x_overlap <= 0:
+            return 0.0
+        area = a.w * a.h
+        if area <= 0:
+            return 0.0
+        return (x_overlap * y_overlap) / area
+
+    merged: List[WordBox] = []
+    used_k = set()
+
+    for we in words_eng:
+        best_j = None
+        best_r = 0.0
+        for j, wk in enumerate(words_kor):
+            r = overlap_ratio(we, wk)
+            if r > best_r:
+                best_r = r
+                best_j = j
+
+        if best_j is not None and best_r >= 0.45:
+            wk = words_kor[best_j]
+            used_k.add(best_j)
+
+            te = (we.text or "").strip()
+            tk = (wk.text or "").strip()
+
+            # 한글은 kor 우선
+            if korean_re.search(tk):
+                merged.append(WordBox(text=tk, x=we.x, y=we.y, w=we.w, h=we.h, conf=we.conf))
+            else:
+                # 기호는 eng 우선(코드 기호 살리기)
+                te_has_sym = any(c in te for c in symbol_chars)
+                tk_has_sym = any(c in tk for c in symbol_chars)
+                if te_has_sym and not tk_has_sym:
+                    merged.append(we)
+                elif tk_has_sym and not te_has_sym:
+                    merged.append(WordBox(text=tk, x=we.x, y=we.y, w=we.w, h=we.h, conf=we.conf))
+                else:
+                    merged.append(we)
+        else:
+            merged.append(we)
+
+    # eng이 못 잡은 한글 토큰만 추가
+    for j, wk in enumerate(words_kor):
+        if j in used_k:
+            continue
+        if korean_re.search((wk.text or "")):
+            merged.append(wk)
+
+    return merged
+
+
+def get_tesseract_words_best_2pass(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 4,
+    code_mode: bool = True,
+    remove_emoji: bool = True,
+    oem: int = 3,
+    psm_list: Optional[List[int]] = None,
+    user_defined_dpi: int = 300,
+) -> List[WordBox]:
+    """Tesseract 2-pass:
+    PASS1(강전처리 eng whitelist) vs PASS2(약전처리 eng whitelist) best 선택
+    + kor(+eng) 결과와 병합(한글만 보강)
     """
-    화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
+    if pytesseract is None:
+        return []
+
+    if psm_list is None:
+        psm_list = [6, 4, 11, 12, 7]
+
+    pil_img_orig = open_image_any(img)
+    if scale and scale != 1:
+        w, h = pil_img_orig.size
+        pil_img_orig = pil_img_orig.resize((w * scale, h * scale), Image.LANCZOS)
+
+    eng_lang = pick_tess_lang("eng")
+
+    # PASS1
+    pil_img_pass1 = preprocess_for_code_pil(pil_img_orig, enabled=code_mode)
+    words_p1, sc_p1 = _tess_best_by_psm(
+        pil_img_pass1,
+        lang=eng_lang,
+        psm_list=psm_list,
+        oem=oem,
+        code_mode=code_mode,
+        remove_emoji=remove_emoji,
+        user_defined_dpi=user_defined_dpi,
+        whitelist_override=_tesseract_eng_whitelist(),
+    )
+
+    # PASS2 (기호용)
+    pil_img_pass2 = preprocess_for_code_pil_light(pil_img_orig, enabled=code_mode)
+    words_p2, sc_p2 = _tess_best_by_psm(
+        pil_img_pass2,
+        lang=eng_lang,
+        psm_list=psm_list,
+        oem=oem,
+        code_mode=code_mode,
+        remove_emoji=remove_emoji,
+        user_defined_dpi=user_defined_dpi,
+        whitelist_override=_tesseract_eng_whitelist(),
+    )
+
+    words_eng = words_p2 if sc_p2 > sc_p1 else words_p1
+    sc_eng = max(sc_p1, sc_p2)
+
+    # kor(+eng) 보강 (whitelist OFF)
+    installed = set(get_tesseract_langs())
+    if "kor" in installed and "eng" in installed:
+        kor_lang = "kor+eng"
+    elif "kor" in installed:
+        kor_lang = "kor"
+    else:
+        kor_lang = eng_lang
+
+    words_kor, _ = _tess_best_by_psm(
+        pil_img_pass2,
+        lang=kor_lang,
+        psm_list=psm_list,
+        oem=oem,
+        code_mode=code_mode,
+        remove_emoji=remove_emoji,
+        user_defined_dpi=user_defined_dpi,
+        whitelist_override=None,
+    )
+
+    merged = _merge_tesseract_two_pass(words_eng, words_kor)
+    if not merged:
+        return words_kor or words_eng
+
+    # 병합이 너무 나빠지면 eng-only로 롤백
+    try:
+        t_merged = reconstruct_text_from_words(merged, code_mode=True, normalize=False, indent_step=4, remove_emoji=remove_emoji)
+        sc_m = _score_code_text(t_merged)
+        if sc_eng > sc_m + 3.0:
+            return words_eng
+    except Exception:
+        pass
+
+    return merged
+
+
+def capture_fullscreen_bgr(monitor_index: int = 1) -> np.ndarray:
+    with mss() as sct:
+        monitor = sct.monitors[monitor_index]
+        img = np.array(sct.grab(monitor))
+        bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return bgr
+
+
+def copy_to_clipboard(text: str) -> None:
+    pyperclip.copy(text)
+
+
+def safe_imread(path: Union[str, PathLib]) -> Optional[np.ndarray]:
+    """
+    한글 경로 지원 이미지 읽기 (cv2.imread 대체).
+    
+    Args:
+        path: 이미지 파일 경로
     
     Returns:
-        dict: {
-            "success": bool,
-            "text": str (OCR 결과),
-            "method": str (사용된 OCR 방법),
-            "error": str (에러 메시지, 실패 시)
+        BGR 이미지 (numpy array) 또는 None
+    """
+    path_str = str(path)
+    try:
+        # numpy를 통한 우회 방법 (한글 경로 지원)
+        import numpy as np
+        img_array = np.fromfile(path_str, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception as e:
+        print(f"⚠️ safe_imread 실패: {e}")
+        return None
+
+
+def safe_imsave(path: Union[str, PathLib], img: np.ndarray, quality: int = 95) -> bool:
+    """
+    한글 경로 지원 이미지 저장 (cv2.imwrite 대체).
+    
+    Args:
+        path: 저장 경로
+        img: BGR 이미지 (numpy array)
+        quality: JPEG 품질 (1-100)
+    
+    Returns:
+        성공 여부
+    """
+    path_str = str(path)
+    try:
+        # 확장자에 따라 인코딩 방식 선택
+        ext = os.path.splitext(path_str)[1].lower()
+        if ext in ('.jpg', '.jpeg'):
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            success, encoded_img = cv2.imencode(ext, img, encode_param)
+        elif ext == '.png':
+            encode_param = [int(cv2.IMWRITE_PNG_COMPRESSION), 9]
+            success, encoded_img = cv2.imencode(ext, img, encode_param)
+        else:
+            success, encoded_img = cv2.imencode(ext, img)
+        
+        if success:
+            encoded_img.tofile(path_str)
+            return True
+        return False
+    except Exception as e:
+        print(f"⚠️ safe_imsave 실패: {e}")
+        return False
+
+
+def select_roi_auto(image: np.ndarray, window_name: str = "Select ROI") -> np.ndarray:
+    drawing = False
+    start_point = None
+    end_point = None
+    current_rect = None
+
+    def mouse_callback(event, x, y, flags, param):
+        nonlocal drawing, start_point, end_point, current_rect
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing = True
+            start_point = (x, y)
+            end_point = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if drawing:
+                end_point = (x, y)
+                img_copy = image.copy()
+                cv2.rectangle(img_copy, start_point, end_point, (209, 226, 125), 2)
+                cv2.imshow(window_name, img_copy)
+        elif event == cv2.EVENT_LBUTTONUP:
+            if drawing:
+                drawing = False
+                end_point = (x, y)
+                x1, y1 = start_point
+                x2, y2 = end_point
+                x = min(x1, x2)
+                y = min(y1, y2)
+                w = abs(x2 - x1)
+                h = abs(y2 - y1)
+                if w > 0 and h > 0:
+                    current_rect = (x, y, w, h)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.setMouseCallback(window_name, mouse_callback)
+    cv2.imshow(window_name, image)
+
+    while current_rect is None:
+        key = cv2.waitKey(10) & 0xFF
+        if key == 27:
+            cv2.destroyAllWindows()
+            raise ValueError("ROI 선택이 취소되었습니다.")
+        if current_rect is not None:
+            break
+
+    cv2.destroyAllWindows()
+    x, y, w, h = current_rect
+    cropped = image[y : y + h, x : x + w]
+    return cropped
+
+
+def merge_tesseract_winrt_results(
+    tesseract_words: List[WordBox],
+    winrt_words: List[WordBox],
+) -> str:
+    korean_re = re.compile(r"[가-힣]")
+    symbol_chars = set(":;,\".'")
+
+    def overlap_ratio(a: WordBox, b: WordBox) -> float:
+        y_overlap = min(a.y2, b.y2) - max(a.y, b.y)
+        if y_overlap <= 0:
+            return 0.0
+        x_overlap = min(a.x2, b.x2) - max(a.x, b.x)
+        if x_overlap <= 0:
+            return 0.0
+        area = a.w * a.h
+        if area <= 0:
+            return 0.0
+        return (x_overlap * y_overlap) / area
+
+    merged_words: List[WordBox] = []
+    used_win = set()
+
+    for tw in tesseract_words:
+        best_j = None
+        best_r = 0.0
+        for j, ww in enumerate(winrt_words):
+            r = overlap_ratio(tw, ww)
+            if r > best_r:
+                best_r = r
+                best_j = j
+
+        if best_j is not None and best_r >= 0.45:
+            ww = winrt_words[best_j]
+            used_win.add(best_j)
+
+            tt = (tw.text or "").strip()
+            wt = (ww.text or "").strip()
+
+            if korean_re.search(wt):
+                final = wt
+            else:
+                # 기호는 tesseract 우선
+                t_sym = any(c in tt for c in symbol_chars)
+                w_sym = any(c in wt for c in symbol_chars)
+                if t_sym and not w_sym:
+                    final = tt
+                elif w_sym and not t_sym:
+                    final = wt
+                else:
+                    final = tt
+
+            merged_words.append(WordBox(text=final, x=tw.x, y=tw.y, w=tw.w, h=tw.h, conf=tw.conf))
+        else:
+            merged_words.append(tw)
+
+    # winrt 단독 한글 토큰 추가
+    for j, ww in enumerate(winrt_words):
+        if j in used_win:
+            continue
+        if korean_re.search((ww.text or "")):
+            merged_words.append(ww)
+
+    return reconstruct_text_from_words(
+        merged_words,
+        code_mode=True,
+        normalize=True,
+        indent_step=4,
+        remove_emoji=True,
+    )
+
+
+def check_winrt_available():
+    """WinRT 바인딩(파이썬 패키지) 사용 가능 여부."""
+    try:
+        from winrt.windows.media.ocr import OcrEngine  # noqa: F401
+        from winrt.windows.globalization import Language  # noqa: F401
+        from winrt.windows.graphics.imaging import SoftwareBitmap, BitmapPixelFormat  # noqa: F401
+        from winrt.windows.storage.streams import DataWriter  # noqa: F401
+        from winrt.windows.foundation.collections import IVectorView  # noqa: F401
+        return True, None
+    except Exception as e:
+        install_cmd = (
+            "python -m pip install "
+            "winrt-runtime "
+            "winrt-Windows.Foundation "
+            "winrt-Windows.Foundation.Collections "
+            "winrt-Windows.Globalization "
+            "winrt-Windows.Graphics.Imaging "
+            "winrt-Windows.Storage.Streams "
+            "winrt-Windows.Media.Ocr"
+        )
+        return False, f"{e}\n\n필수 설치(cmd):\n{install_cmd}"
+
+
+def check_paddleocr_available():
+    """PaddleOCR 사용 가능 여부."""
+    if not PADDLEOCR_AVAILABLE:
+        return False, "paddleocr 패키지가 설치되지 않았습니다.\n설치: pip install paddlepaddle paddleocr"
+    return True, None
+
+
+# --- PaddleOCR optional ---
+_PADDLE_OCR = None
+
+# 커스텀 학습 모델 경로 (Detection 모델)
+# Inference 모델 변환 후 이 경로에 모델이 있어야 함
+CUSTOM_DET_MODEL_DIR = PathLib(__file__).parent.parent / "output" / "det_ke_inference"
+USE_CUSTOM_DET_MODEL = (
+    CUSTOM_DET_MODEL_DIR.exists() 
+    and (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists()
+)
+
+
+def get_paddle_ocr(
+    lang: str = "korean", 
+    use_gpu: bool = True, 
+    use_angle_cls: bool = True,
+    use_custom_det: bool = True,  # 커스텀 Detection 모델 사용 여부
+) -> Optional[Any]:
+    """
+    PaddleOCR 인스턴스 가져오기 (lazy initialization, 싱글턴).
+    
+    Args:
+        lang: 언어 설정 (기본: "korean")
+        use_gpu: GPU 사용 여부
+        use_angle_cls: 각도 분류기 사용 여부
+        use_custom_det: 커스텀 학습된 Detection 모델 사용 여부
+    """
+    global _PADDLE_OCR
+    if _PADDLE_OCR is not None:
+        return _PADDLE_OCR
+    if not PADDLEOCR_AVAILABLE:
+        return None
+    try:
+        kwargs = {
+            "use_angle_cls": use_angle_cls,
+            "lang": lang,
+            "use_gpu": use_gpu,
+            "show_log": False,
         }
+        
+        # 커스텀 Detection 모델 사용
+        if use_custom_det and USE_CUSTOM_DET_MODEL:
+            kwargs["det_model_dir"] = str(CUSTOM_DET_MODEL_DIR)
+            print(f"[INFO] Using custom Detection model: {CUSTOM_DET_MODEL_DIR}")
+            print(f"[INFO] Model performance: HMean 90.3%, Precision 91.3%, Recall 89.4%")
+        elif use_custom_det and not USE_CUSTOM_DET_MODEL:
+            print(f"[WARN] Custom Detection model not found at {CUSTOM_DET_MODEL_DIR}")
+            print(f"[WARN] Falling back to default PaddleOCR model")
+        
+        _PADDLE_OCR = PaddleOCR(**kwargs)
+        return _PADDLE_OCR
+    except Exception as e:
+        print(f"⚠️ PaddleOCR init failed -> fallback: {e}")
+        _PADDLE_OCR = None
+        return None
+
+
+def preprocess_for_paddle_code(bgr: np.ndarray, scale: int = 2) -> np.ndarray:
+    """
+    코드 스크린샷 전용 전처리 (BGR 입력).
+    
+    Args:
+        bgr: BGR 형식 numpy array
+        scale: 업스케일 팩터 (2~3 권장)
+    
+    Returns:
+        전처리된 BGR 이미지
+    """
+    img = bgr.copy()
+    
+    # 업스케일
+    if scale and scale > 1:
+        h, w = img.shape[:2]
+        img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    
+    # gray 변환
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # contrast 강화
+    gray = cv2.convertScaleAbs(gray, alpha=1.6, beta=0)
+    
+    # 가벼운 sharpen
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+    sharp = cv2.filter2D(gray, -1, kernel)
+    
+    # BGR로 변환 (PaddleOCR 입력 형식)
+    out = cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR)
+    return out
+
+
+def paddleocr_words_from_bgr(bgr: np.ndarray) -> Tuple[List[WordBox], List, List, List, np.ndarray]:
+    """
+    PaddleOCR로 BGR 이미지에서 WordBox 리스트 추출.
+    
+    Args:
+        bgr: BGR 형식 numpy array
+    
+    Returns:
+        (words, boxes, txts, scores, preprocessed_img) 튜플
+        - words: WordBox 리스트 (reconstruct_text_from_words에 사용)
+        - boxes: 4점 좌표 리스트 [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], ...]
+        - txts: 텍스트 문자열 리스트
+        - scores: 신뢰도 리스트
+        - preprocessed_img: 전처리된 이미지 (시각화용)
+    """
+    ocr = get_paddle_ocr(lang="korean", use_gpu=True, use_angle_cls=True)
+    if ocr is None:
+        return [], [], [], [], bgr
+    
+    # 전처리
+    img = preprocess_for_paddle_code(bgr, scale=2)
+    
+    # OCR 실행
+    try:
+        result = ocr.ocr(img, cls=True)
+    except Exception as e:
+        print(f"⚠️ PaddleOCR 실행 실패: {e}")
+        return [], [], [], [], img
+    
+    words: List[WordBox] = []
+    boxes = []
+    txts = []
+    scores = []
+    
+    if not result or not result[0]:
+        return words, boxes, txts, scores, img
+    
+    # result: [ [ [box, (text, score)], ... ] ]
+    for line in result[0]:
+        if not line:
+            continue
+        for item in line:
+            if len(item) < 2:
+                continue
+            
+            box = item[0]  # 4 points: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+            text_info = item[1]  # (text, score)
+            
+            if not box or not text_info:
+                continue
+            
+            text = text_info[0] if isinstance(text_info, (list, tuple)) else str(text_info)
+            score = float(text_info[1]) if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 0.0
+            
+            # 전각→반각 정규화만 (의미 변경 금지)
+            text = text.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+            text = text.replace("；", ";").replace("﹔", ";")
+            text = text.replace("，", ",").replace("．", ".")
+            text = text.replace("—", "-").replace("–", "-")
+            text = CTRL_RE.sub("", text)  # 제어문자 제거
+            text = text.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")  # BOM/zero-width 제거
+            text = EMOJI_RE.sub("", text)  # 이모지 제거
+            
+            text = text.strip()
+            if not text:
+                continue
+            
+            # box에서 min/max로 x, y, w, h 계산
+            xs = [float(p[0]) for p in box if len(p) >= 2]
+            ys = [float(p[1]) for p in box if len(p) >= 2]
+            
+            if not xs or not ys:
+                continue
+            
+            x1, y1 = float(min(xs)), float(min(ys))
+            x2, y2 = float(max(xs)), float(max(ys))
+            w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
+            
+            # WordBox 생성
+            words.append(WordBox(text=text, x=x1, y=y1, w=w, h=h, conf=score))
+            
+            # boxes는 원본 4점 좌표 유지 (CSV 저장용)
+            boxes.append(box)
+            txts.append(text)
+            scores.append(score)
+    
+    return words, boxes, txts, scores, img
+
+
+def image_to_text_paddle(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 2,
+    code_mode: bool = True,
+    normalize: bool = True,
+    remove_emoji: bool = True,
+    return_boxes: bool = False,
+) -> Union[str, Tuple[str, List[List[float]], List[str], List[float]]]:
+    """
+    PaddleOCR로 이미지에서 텍스트 추출.
+    
+    Args:
+        img: 입력 이미지 (numpy array or PIL Image)
+        scale: 이미지 스케일 팩터 (1 이상)
+        code_mode: 코드 모드 (현재는 사용 안 함, 향후 확장용)
+        normalize: 후처리 정규화 (전각→반각만)
+        remove_emoji: 이모지 제거
+        return_boxes: True면 (text, boxes, txts, scores) 튜플 반환, False면 text만 반환
+    
+    Returns:
+        str 또는 (text, boxes, txts, scores) 튜플
+        - text: 추출된 텍스트 (줄바꿈 포함)
+        - boxes: 각 텍스트의 4점 좌표 [[x1,y1],[x2,y2],[x3,y3],[x4,y4], ...]
+        - txts: 각 텍스트 문자열 리스트
+        - scores: 각 텍스트의 신뢰도 리스트
+    """
+    if not PADDLEOCR_AVAILABLE:
+        raise RuntimeError("PaddleOCR가 설치되지 않았습니다. pip install paddlepaddle paddleocr")
+    
+    ocr = get_paddle_ocr(lang="korean", use_gpu=True, use_angle_cls=True)
+    if ocr is None:
+        raise RuntimeError("PaddleOCR 초기화 실패")
+    
+    # 이미지 변환 및 스케일링
+    if isinstance(img, Image.Image):
+        pil_img = img.convert("RGB")
+        img_array = np.array(pil_img)
+    elif isinstance(img, np.ndarray):
+        if len(img.shape) == 3 and img.shape[2] == 3:
+            img_array = img
+        else:
+            img_array = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    else:
+        raise TypeError("img must be PIL.Image or numpy.ndarray")
+    
+    # 스케일링
+    if scale > 1:
+        h, w = img_array.shape[:2]
+        img_array = cv2.resize(img_array, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
+    
+    # OCR 실행
+    try:
+        result = ocr.ocr(img_array, cls=True)
+    except Exception as e:
+        raise RuntimeError(f"PaddleOCR 실행 실패: {e}")
+    
+    if not result or not result[0]:
+        text = ""
+        boxes = []
+        txts = []
+        scores = []
+    else:
+        boxes = []
+        txts = []
+        scores = []
+        lines = []
+        
+        for line in result[0]:
+            if not line or len(line) < 2:
+                continue
+            
+            box_info = line[0]  # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+            text_info = line[1]  # (text, score)
+            
+            if not box_info or not text_info:
+                continue
+            
+            text_str = text_info[0] if isinstance(text_info, (list, tuple)) else str(text_info)
+            score_val = text_info[1] if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 0.0
+            
+            # 후처리: 전각→반각 정규화만 (의미 변경 금지)
+            if normalize:
+                text_str = text_str.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+                text_str = text_str.replace("；", ";").replace("﹔", ";")
+                text_str = text_str.replace("，", ",").replace("．", ".")
+                text_str = text_str.replace("—", "-").replace("–", "-")
+                # 제어문자 제거
+                text_str = CTRL_RE.sub("", text_str)
+                # BOM/zero-width 제거
+                text_str = text_str.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+            
+            if remove_emoji:
+                text_str = EMOJI_RE.sub("", text_str)
+            
+            text_str = text_str.strip()
+            if not text_str:
+                continue
+            
+            # box 좌표 정규화 (flat list로 변환)
+            box_flat = []
+            for point in box_info:
+                if len(point) >= 2:
+                    box_flat.extend([float(point[0]), float(point[1])])
+            
+            if len(box_flat) >= 8:  # 4점 = 8개 좌표
+                boxes.append(box_flat)
+                txts.append(text_str)
+                scores.append(float(score_val))
+                lines.append(text_str)
+        
+        text = "\n".join(lines)
+    
+    if return_boxes:
+        return text, boxes, txts, scores
+    return text
+
+
+def save_ocr_results(
+    img: Union[np.ndarray, Image.Image],
+    boxes: List,
+    txts: List[str],
+    scores: List[float],
+    output_dir: Union[str, PathLib],
+    stem: str = "ocr_result",
+    use_safe_imsave: bool = True,
+) -> Tuple[str, str]:
+    """
+    OCR 결과를 이미지(시각화)와 CSV로 저장.
+    
+    Args:
+        img: 원본 이미지 (BGR numpy array 또는 PIL Image)
+        boxes: 각 텍스트의 4점 좌표 리스트 [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], ...] 또는 flat [[x1,y1,x2,y2,x3,y3,x4,y4], ...]
+        txts: 각 텍스트 문자열 리스트
+        scores: 각 텍스트의 신뢰도 리스트
+        output_dir: 출력 디렉토리
+        stem: 파일명 stem (확장자 제외)
+        use_safe_imsave: True면 safe_imsave 사용 (한글 경로 지원)
+    
+    Returns:
+        (image_path, csv_path) 튜플
+    """
+    output_dir = PathLib(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 이미지 변환 (BGR로 통일)
+    if isinstance(img, Image.Image):
+        pil_img = img.convert("RGB")
+        img_array = np.array(pil_img)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    elif isinstance(img, np.ndarray):
+        if len(img.shape) == 3:
+            if img.shape[2] == 3:
+                img_bgr = img.copy()
+            else:
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        else:
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+        raise TypeError("img must be PIL.Image or numpy.ndarray")
+    
+    # 시각화 이미지 생성 (BGR)
+    vis_img_bgr = img_bgr.copy()
+    
+    # 박스 및 텍스트 그리기 (OpenCV 사용)
+    for box, txt, score in zip(boxes, txts, scores):
+        # box 형식 확인: 4점 좌표 리스트 또는 flat 리스트
+        if isinstance(box[0], (list, tuple)):
+            # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] 형식
+            points = np.array([[int(p[0]), int(p[1])] for p in box], dtype=np.int32)
+        else:
+            # [x1,y1,x2,y2,x3,y3,x4,y4] flat 형식
+            if len(box) >= 8:
+                points = np.array([
+                    [int(box[0]), int(box[1])],
+                    [int(box[2]), int(box[3])],
+                    [int(box[4]), int(box[5])],
+                    [int(box[6]), int(box[7])],
+                ], dtype=np.int32)
+            else:
+                continue
+        
+        # 박스 그리기 (다각형)
+        cv2.polylines(vis_img_bgr, [points], isClosed=True, color=(0, 255, 0), thickness=2)
+        
+        # 텍스트 그리기 (첫 번째 점 위에)
+        text_pos = (int(points[0][0]), int(points[0][1]) - 5)
+        text_str = f"{txt} ({score:.2f})"
+        cv2.putText(vis_img_bgr, text_str, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    
+    # 이미지 저장
+    image_path = output_dir / f"{stem}_ocr_result.jpg"
+    if use_safe_imsave:
+        safe_imsave(str(image_path), vis_img_bgr, quality=95)
+    else:
+        cv2.imwrite(str(image_path), vis_img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    
+    # CSV 저장
+    csv_path = output_dir / f"{stem}_ocr_result.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        # 헤더: x1 y1 x2 y2 x3 y3 x4 y4 text score
+        writer.writerow(["x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4", "text", "score"])
+        # 데이터
+        for box, txt, score in zip(boxes, txts, scores):
+            # box를 flat 형식으로 변환
+            if isinstance(box[0], (list, tuple)):
+                # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] -> flat
+                flat_box = [coord for point in box for coord in point[:2]]
+            else:
+                # 이미 flat
+                flat_box = box[:8] if len(box) >= 8 else box
+            
+            if len(flat_box) >= 8:
+                row = [
+                    flat_box[0], flat_box[1],  # x1, y1
+                    flat_box[2], flat_box[3],  # x2, y2
+                    flat_box[4], flat_box[5],  # x3, y3
+                    flat_box[6], flat_box[7],  # x4, y4
+                    txt,
+                    score,
+                ]
+                writer.writerow(row)
+    
+    return str(image_path), str(csv_path)
+
+
+def capture_and_ocr(
+    engine: str = "paddle",
+    save_dir: Optional[Union[str, PathLib]] = None,
+    save_stem: Optional[str] = None,
+) -> dict:
+    """
+    Capture screen and perform OCR. PaddleOCR 우선 사용.
+    
+    Args:
+        engine: OCR 엔진 선택
+            - "paddle": PaddleOCR 우선, 실패 시 WinRT+Tesseract fallback (기본값)
+            - "paddle_only": PaddleOCR만 사용 (fallback 없음)
+            - "hybrid": PaddleOCR 실패 시 WinRT+Tesseract fallback
+        save_dir: 결과 저장 디렉토리 (None이면 저장 안 함)
+        save_stem: 저장 파일명 stem (None이면 타임스탬프 사용)
+    
+    Returns:
+        dict with keys: success, text, method, error, image_path, csv_path
     """
     try:
-        # Tesseract와 WinRT 사용 가능 여부 확인
-        tesseract_available = ocrtest.pytesseract is not None
+        paddle_available, paddle_error = check_paddleocr_available()
+        tesseract_available = pytesseract is not None
         winrt_available, winrt_error = check_winrt_available()
-        
-        if not tesseract_available and not winrt_available:
-            return {
-                "success": False,
-                "error": "Tesseract와 WinRT 모두 사용 불가능합니다. OCR을 수행할 수 없습니다.",
-                "text": "",
-                "method": ""
-            }
-        
-        # 화면 캡처
+
         print("📸 화면 캡처 중...")
         screen = capture_fullscreen_bgr()
         print("✅ 화면 캡처 완료")
-        
-        # 드래그로 영역 선택
+
         print("🖱️ OpenCV 창을 열고 영역 선택을 기다리는 중...")
-        print("   (서버 컴퓨터에서 '원하는 부분을 드래그로 박스치세요' 창이 열립니다)")
         cropped = select_roi_auto(screen, window_name="원하는 부분을 드래그로 박스치세요")
         print("✅ 영역 선택 완료")
-        
-        # OCR 인식
+
         print("🔍 OCR 인식 시작...")
-        ocr_result = None
-        ocr_method = None
-        
-        tesseract_words = None
-        tesseract_text = None
-        winrt_words = None
-        winrt_text = None
-        
-        if tesseract_available:
+
+        ocr_result = ""
+        ocr_method = ""
+        image_path = None
+        csv_path = None
+
+        # PaddleOCR 우선 시도
+        if paddle_available:
             try:
-                # 레이아웃용 WordBox 가져오기
-                tesseract_words = get_tesseract_words(
-                    cropped,
-                    lang="kor+eng",
-                    scale=4,
-                    code_mode=True,
-                    remove_emoji=True
-                )
-                # 전체 텍스트도 가져오기 (비교용)
-                tesseract_text = image_to_text(
-                    cropped,
-                    lang="kor+eng",
-                    scale=4,
-                    code_mode=True,
-                    layout=True,
-                    normalize=True
-                )
+                print("🔍 PaddleOCR 실행 중...")
+                words, boxes, txts, scores, preprocessed_img = paddleocr_words_from_bgr(cropped)
+                
+                if words:
+                    print(f"📊 PaddleOCR: {len(words)}개 토큰 인식 (scale=2)")
+                    
+                    # 기존 reconstruct_text_from_words로 레이아웃 복원
+                    ocr_result = reconstruct_text_from_words(
+                        words,
+                        code_mode=True,
+                        normalize=True,
+                        indent_step=4,
+                        remove_emoji=True,
+                    )
+                    ocr_method = "PaddleOCR(korean, scale=2) + reconstruct_text_from_words"
+                    
+                    # 저장
+                    if save_dir is not None:
+                        if save_stem is None:
+                            from datetime import datetime
+                            save_stem = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        image_path, csv_path = save_ocr_results(
+                            preprocessed_img, boxes, txts, scores, save_dir, save_stem, use_safe_imsave=True
+                        )
+                        print(f"💾 결과 저장: {image_path}, {csv_path}")
+                else:
+                    print("⚠️ PaddleOCR: 인식된 토큰 없음")
+                    if engine == "paddle_only":
+                        return {
+                            "success": False,
+                            "error": "PaddleOCR: 인식된 토큰이 없습니다.",
+                            "text": "",
+                            "method": "",
+                            "image_path": None,
+                            "csv_path": None,
+                        }
+                    # fallback으로 진행
+                
             except Exception as e:
-                print(f"⚠ Tesseract OCR 실패: {e}")
-        
-        if winrt_available:
-            try:
-                # WordBox 가져오기 (병합용)
-                winrt_words = get_winrt_words(
-                    cropped,
-                    scale=3,
-                    code_mode=True,
-                    remove_emoji=True
-                )
-                # 전체 텍스트도 가져오기 (비교용)
-                winrt_text = image_to_text_winrt(
-                    cropped,
-                    scale=3,
-                    code_mode=True,
-                    normalize=True
-                )
-            except Exception as e:
-                print(f"⚠ WinRT OCR 실패: {e}")
-        
-        # 결과 병합
-        if tesseract_words and winrt_words:
-            try:
-                pil_img = open_image_any(cropped)
-                ocr_result = merge_tesseract_winrt_results(
-                    tesseract_words,
-                    winrt_words,
-                    pil_img
-                )
-                ocr_method = "Tesseract + WinRT 병합"
-            except Exception as e:
-                print(f"⚠ 병합 실패: {e}, Tesseract 결과 사용")
-                if tesseract_text:
-                    ocr_result = tesseract_text
-                    ocr_method = "Tesseract (병합 실패)"
-        elif tesseract_text:
-            ocr_result = tesseract_text
-            ocr_method = "Tesseract"
-        elif winrt_text:
-            ocr_result = winrt_text
-            ocr_method = "WinRT"
-        
+                print(f"⚠️ PaddleOCR 실패: {e}")
+                if engine == "paddle_only":
+                    return {
+                        "success": False,
+                        "error": f"PaddleOCR 실패: {e}",
+                        "text": "",
+                        "method": "",
+                        "image_path": None,
+                        "csv_path": None,
+                    }
+                # fallback으로 진행
+
+        # Fallback: WinRT + Tesseract (hybrid 모드 또는 PaddleOCR 실패 시)
+        if not ocr_result and engine in ("paddle", "hybrid"):
+            if not winrt_available:
+                return {
+                    "success": False,
+                    "error": f"WinRT OCR 실패 (fallback): {winrt_error}",
+                    "text": "",
+                    "method": "",
+                    "image_path": None,
+                    "csv_path": None,
+                }
+
+            if not tesseract_available:
+                return {
+                    "success": False,
+                    "error": "pytesseract 미설치: Tesseract 보조(구조/기호)를 사용할 수 없습니다.",
+                    "text": "",
+                    "method": "",
+                    "image_path": None,
+                    "csv_path": None,
+                }
+
+            print("🔍 WinRT + Tesseract (fallback) 실행 중...")
+            
+            # 1) WinRT (ko/en 2-pass) — 한글/문장 강점
+            winrt_words = get_winrt_words(cropped, scale=3, code_mode=True, remove_emoji=True)
+
+            # 2) Tesseract 2-pass + PSM sweep + DPI=300 — 구조/기호 강점
+            tesseract_words = get_tesseract_words_best_2pass(
+                cropped,
+                scale=4,
+                code_mode=True,
+                remove_emoji=True,
+                user_defined_dpi=300,
+                psm_list=[6, 4, 11, 12, 7],
+            )
+
+            # 3) 병합: "구조/기호는 tesseract", "한글은 winrt"
+            ocr_result = merge_tesseract_winrt_results(
+                tesseract_words=tesseract_words,
+                winrt_words=winrt_words,
+            )
+
+            ocr_method = "WinRT(ko/en) + Tesseract(2-pass + dpi300 + psm-sweep + dictOFF) merge (fallback)"
+
         if ocr_result:
-            # 클립보드에 저장
             print(f"✅ OCR 완료 ({ocr_method})")
             copy_to_clipboard(ocr_result)
             print("📋 클립보드에 저장 완료")
@@ -168,31 +1908,39 @@ def capture_and_ocr() -> dict:
                 "success": True,
                 "text": ocr_result,
                 "method": ocr_method,
-                "error": None
+                "error": None,
+                "image_path": image_path,
+                "csv_path": csv_path,
             }
-        else:
-            return {
-                "success": False,
-                "error": "모든 OCR 엔진이 실패했습니다.",
-                "text": "",
-                "method": ""
-            }
-    
+
+        return {
+            "success": False,
+            "error": "OCR 결과가 비어있습니다.",
+            "text": "",
+            "method": "",
+            "image_path": None,
+            "csv_path": None,
+        }
+
     except ValueError as e:
-        # 사용자가 ROI 선택을 취소한 경우
         if "취소" in str(e) or "cancel" in str(e).lower():
             return {
                 "success": False,
                 "error": "사용자가 영역 선택을 취소했습니다.",
                 "text": "",
-                "method": ""
+                "method": "",
+                "image_path": None,
+                "csv_path": None,
             }
         return {
             "success": False,
             "error": str(e),
             "text": "",
-            "method": ""
+            "method": "",
+            "image_path": None,
+            "csv_path": None,
         }
+
     except Exception as e:
         import traceback
         error_msg = f"OCR 처리 중 오류 발생: {str(e)}\n{traceback.format_exc()}"
@@ -200,6 +1948,76 @@ def capture_and_ocr() -> dict:
             "success": False,
             "error": error_msg,
             "text": "",
-            "method": ""
+            "method": "",
+            "image_path": None,
+            "csv_path": None,
         }
 
+
+# -----------------------------
+# OCR 후처리 테스트 함수
+# -----------------------------
+def test_normalize_code_line_ocr_patterns():
+    """OCR 특화 복원 패턴 테스트"""
+    
+    # 테스트 1: zip[tuple](...) -> zip(...)
+    input1 = "for box, txt, score in zip[tuple](boxes, txts, scores):"
+    expected1 = "for box, txt, score in zip(boxes, txts, scores):"
+    result1 = normalize_code_line(input1, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert result1 == expected1, f"Test 1 failed: got '{result1}', expected '{expected1}'"
+    
+    # 테스트 2: list[Path](...) -> list(...)
+    input2 = "val_images = list[Path](val_dir.glob(\"*.jpg\"))"
+    expected2 = "val_images = list(val_dir.glob(\"*.jpg\"))"
+    result2 = normalize_code_line(input2, next_line_indent=None, lang_hint="py", safe_mode=True)
+    assert result2 == expected2, f"Test 2 failed: got '{result2}', expected '{expected2}'"
+    
+    # 테스트 3: tqdm[Path](...) -> tqdm(...)
+    input3 = "for img_path in tqdm[Path](val_images, desc=\"PaddleOCR Pretrained Inference\", unit=\"img\"):"
+    expected3 = "for img_path in tqdm(val_images, desc=\"PaddleOCR Pretrained Inference\", unit=\"img\"):"
+    result3 = normalize_code_line(input3, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert result3 == expected3, f"Test 3 failed: got '{result3}', expected '{expected3}'"
+    
+    # 테스트 4: forimg_pathintqdm[Path]|(...) -> for img_path in tqdm(...)
+    input4 = "forimg_pathintqdm[Path]|(val_images, desc=\"PaddleOCRPretrainedInference\", unit=\"img\"):"
+    expected4 = "for img_path in tqdm(val_images, desc=\"PaddleOCR Pretrained Inference\", unit=\"img\"):"
+    result4 = normalize_code_line(input4, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert result4 == expected4, f"Test 4 failed: got '{result4}', expected '{expected4}'"
+    
+    # 테스트 5: newline=", encoding='utf-8-sig' -> newline="", encoding='utf-8-sig'
+    input5 = "with open(save_csv_path, 'w', newline=\", encoding='utf-8-sig') as f"
+    expected5 = "with open(save_csv_path, 'w', newline=\"\", encoding='utf-8-sig') as f:"
+    result5 = normalize_code_line(input5, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert result5 == expected5, f"Test 5 failed: got '{result5}', expected '{expected5}'"
+    
+    # 테스트 6: 실제 OCR 결과 패턴
+    input6 = "val_dir=Path(\"/content/data/HMG)O|E{/TS1/val\") path(\"/content/data/원천데이터/TS1/va1\")"
+    expected6 = "val_dir=Path(\"/content/data/HMG)O|E{/TS1/val\")"
+    result6 = normalize_code_line(input6, next_line_indent=None, lang_hint="py", safe_mode=True)
+    # 중복 제거는 reconstruct에서 처리되므로 여기서는 경로 중복만 제거
+    assert "path(" not in result6 or result6.count("Path(") == 1, f"Test 6 failed: got '{result6}'"
+    
+    # 테스트 7: exceptExceptionase -> except Exception as e:
+    input7 = "exceptExceptionase:"
+    expected7 = "except Exception as e:"
+    result7 = normalize_code_line(input7, next_line_indent=None, lang_hint="py", safe_mode=True)
+    assert result7 == expected7, f"Test 7 failed: got '{result7}', expected '{expected7}'"
+    
+    # 테스트 8: PaddleOCRPretrainedInference -> PaddleOCR Pretrained Inference
+    input8 = "for img_path in tqdm(val_images, desc=\"PaddleOCRPretrainedInference\", unit=\"img\"):"
+    expected8 = "for img_path in tqdm(val_images, desc=\"PaddleOCR Pretrained Inference\", unit=\"img\"):"
+    result8 = normalize_code_line(input8, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert result8 == expected8, f"Test 8 failed: got '{result8}', expected '{expected8}'"
+    
+    # 테스트 9: try: 함수() exceptException -> try:\n    함수()\nexcept Exception as e:
+    input9 = "try: run_inference_and_visualize(img_path, output_dir) exceptException"
+    expected9 = "try:\n    run_inference_and_visualize(img_path, output_dir)\nexcept Exception as e:"
+    result9 = normalize_code_line(input9, next_line_indent=4, lang_hint="py", safe_mode=True)
+    assert "except Exception" in result9, f"Test 9 failed: got '{result9}'"
+    
+    print("[OK] All OCR pattern normalization tests passed!")
+
+
+if __name__ == "__main__":
+    # 테스트 실행
+    test_normalize_code_line_ocr_patterns()

@@ -13,3 +13,32 @@ outputs/
 
 aimodels/
 __pycache__
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+venv_ocr/
+
+# OCR / Paddle outputs
+outputs/
+output/
+data/
+logs/
+*.txt
+*.json
+
+# Large datasets (AIHub)
+OCR_Data/
+PaddleData/
+S:/OCR_Data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Models
+*.pdparams
+*.pdopt
+*.pdmodel
