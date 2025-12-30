@@ -21,6 +21,11 @@ from pathlib import Path as PathLib
 from dataclasses import dataclass
 from typing import List, Optional, Union, Tuple, Dict, Any
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 import numpy as np
 import cv2
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
@@ -261,8 +266,19 @@ SAFE_ID_REPAIRS = [
 
 
 def normalize_code_line(s: str) -> str:
+    """
+    코드 라인 정규화: OCR 오인식 보정 및 코드 기호 보존.
+    - 들여쓰기 및 코드 기호 (->, :, ; 등) 보존 강화
+    - 한글 노이즈 제거 (코드 끝에 붙는 불필요한 한글)
+    - 전각→반각 변환 및 특수문자 보정
+    """
     if not s:
         return s
+    
+    # 코드 필수 기호 보존 및 보정 (우선 처리)
+    s = s.replace("：", ":").replace("；", ";").replace("，", ",")
+    s = s.replace("—", "-").replace("–", "-").replace("→", "->")
+    
     # 한글 오인식 보정 (은 -> g, 등)
     s = re.sub(r"\b은\s*=", "g =", s)
     # 함수 시그니처 보정 (콜론 누락) - img Image.Image -> img: Image.Image
@@ -488,33 +504,64 @@ def reconstruct_text_from_words(
     lines = cluster_lines(clean_words)
     if not lines:
         return ""
+    
+    # 고정밀 글자 폭 계산: 중앙값 높이 기반 평균 글자 폭 추정
+    heights = [w.h for ln in lines for w in ln.words if w.h > 0]
+    med_h = _robust_median(heights, default=14.0)
+    # 글자 높이의 0.52배를 평균 글자 폭으로 추정 (일반적인 폰트 비율)
     char_w = estimate_char_width(lines)
+    # 더 정밀한 추정: 높이 기반 보정
+    if char_w < med_h * 0.45 or char_w > med_h * 0.65:
+        char_w = max(6.0, med_h * 0.52)  # 높이 기반 재계산
+    
     left_margin = min(w.x for ln in lines for w in ln.words)
     raw_lines: List[str] = []
+    
     for ln in lines:
         if not ln.words:
             raw_lines.append("")
             continue
-        first = ln.words[0]
-        leading_spaces = int(round((first.x - left_margin) / max(1e-6, char_w)))
+        
+        # 정렬된 단어 리스트
+        sorted_words = sorted(ln.words, key=lambda w: w.x)
+        first = sorted_words[0]
+        
+        # 들여쓰기 계산: 물리적 좌표 기반 정밀 계산
+        indent_px = first.x - left_margin
+        leading_spaces = int(round(indent_px / max(1e-6, char_w)))
         leading_spaces = max(0, leading_spaces)
+        
         parts: List[str] = []
         parts.append(" " * leading_spaces)
         parts.append(first.text)
         prev_x2 = first.x2
-        for w in ln.words[1:]:
+        
+        # 단어 간 띄어쓰기 계산: 물리적 간격 기반 정밀 계산
+        for w in sorted_words[1:]:
             txt = w.text
             if not txt:
                 continue
+            
             gap_px = w.x - prev_x2
-            if gap_px <= char_w * 0.10:
+            
+            # 매우 작은 간격 (10% 이하): 공백 없음 (붙여쓰기)
+            if gap_px <= char_w * 0.15:
                 spaces = 0
             else:
+                # 물리적 간격을 글자 폭으로 나누어 공백 개수 계산
                 spaces = int(round(gap_px / max(1e-6, char_w)))
                 spaces = clamp_int(spaces, 1, 80)
+            
+            # 영문/숫자 사이 최소 공백 보장
+            if spaces == 0:
+                prev_text = parts[-1] if parts else ""
+                if re.search(r"\w$", prev_text) and re.search(r"^\w", txt):
+                    spaces = 1
+            
             parts.append(" " * spaces)
             parts.append(txt)
             prev_x2 = max(prev_x2, w.x2)
+        
         raw_lines.append("".join(parts).rstrip())
     if not code_mode:
         out = "\n".join(raw_lines).rstrip() + "\n"
@@ -2368,6 +2415,9 @@ _PADDLE_OCR = None
 
 # 커스텀 학습 모델 경로 (Detection 모델)
 # Inference 모델 변환 후 이 경로에 모델이 있어야 함
+TRAINED_MODEL_DIR = PathLib(__file__).parent.parent / "output" / "det_ke_model"
+TRAINED_MODEL_PDPARAMS = TRAINED_MODEL_DIR / "best_accuracy.pdparams"
+TRAINED_MODEL_CHECKPOINT = TRAINED_MODEL_DIR / "best_accuracy"
 CUSTOM_DET_MODEL_DIR = PathLib(__file__).parent.parent / "output" / "det_ke_inference"
 USE_CUSTOM_DET_MODEL = (
     CUSTOM_DET_MODEL_DIR.exists() 
@@ -2383,41 +2433,327 @@ def get_paddle_ocr(
 ) -> Optional[Any]:
     """
     PaddleOCR 인스턴스 가져오기 (lazy initialization, 싱글턴).
+    **커스텀 모델 강제 모드**: 커스텀 모델이 없거나 로드 실패 시 기본 모델로 Fallback하지 않고 RuntimeError 발생.
     
     Args:
         lang: 언어 설정 (기본: "korean")
-        use_gpu: GPU 사용 여부
+        use_gpu: GPU 사용 여부 (PaddleOCR 3.3.2에서는 무시됨)
         use_angle_cls: 각도 분류기 사용 여부
-        use_custom_det: 커스텀 학습된 Detection 모델 사용 여부
+        use_custom_det: 커스텀 학습된 Detection 모델 사용 여부 (필수)
+    
+    Returns:
+        PaddleOCR 인스턴스 (커스텀 모델 사용)
+    
+    Raises:
+        RuntimeError: 커스텀 모델이 없거나 로드 실패 시
     """
-    global _PADDLE_OCR
+    global _PADDLE_OCR, USE_CUSTOM_DET_MODEL
     if _PADDLE_OCR is not None:
+        # 싱글톤 인스턴스가 있으면 재사용 (서버 시작 시 초기화된 인스턴스 유지)
         return _PADDLE_OCR
     if not PADDLEOCR_AVAILABLE:
-        return None
+        raise RuntimeError("PaddleOCR가 설치되지 않았습니다. pip install paddlepaddle paddleocr")
+    
+    # 커스텀 모델 강제 체크
+    USE_CUSTOM_DET_MODEL = (
+        CUSTOM_DET_MODEL_DIR.exists() 
+        and (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists()
+    )
+    
+    if use_custom_det:
+        if not USE_CUSTOM_DET_MODEL:
+            raise RuntimeError(
+                f"❌ 커스텀 Detection 모델을 찾을 수 없습니다.\n"
+                f"   경로: {CUSTOM_DET_MODEL_DIR}\n"
+                f"   필요한 파일: inference.pdmodel\n\n"
+                f"💡 해결 방법:\n"
+                f"   1. 학습된 모델이 있다면 자동 변환을 시도합니다.\n"
+                f"   2. 또는 수동으로 변환: core/paddle_train/04_export_inference_model.bat 실행\n"
+                f"   3. 서버를 완전히 종료한 후 배치 파일 실행 (GPU 경합 방지)"
+            )
+    
     try:
+        # PaddleOCR 3.3.2에서는 use_gpu, show_log 파라미터 지원 안 함
         kwargs = {
-            "use_angle_cls": use_angle_cls,
             "lang": lang,
-            "use_gpu": use_gpu,
-            "show_log": False,
         }
+        # use_angle_cls는 지원되는 경우에만 추가
+        if use_angle_cls:
+            kwargs["use_angle_cls"] = use_angle_cls
         
-        # 커스텀 Detection 모델 사용
-        if use_custom_det and USE_CUSTOM_DET_MODEL:
-            kwargs["det_model_dir"] = str(CUSTOM_DET_MODEL_DIR)
-            print(f"[INFO] Using custom Detection model: {CUSTOM_DET_MODEL_DIR}")
-            print(f"[INFO] Model performance: HMean 90.3%, Precision 91.3%, Recall 89.4%")
-        elif use_custom_det and not USE_CUSTOM_DET_MODEL:
-            print(f"[WARN] Custom Detection model not found at {CUSTOM_DET_MODEL_DIR}")
-            print(f"[WARN] Falling back to default PaddleOCR model")
+        # 커스텀 Detection 모델 강제 사용
+        kwargs["det_model_dir"] = str(CUSTOM_DET_MODEL_DIR.resolve())
+        print(f"✅ [PaddleOCR] 커스텀 Detection 모델 로드: {CUSTOM_DET_MODEL_DIR}")
+        print(f"   성능: HMean 90.3%, Precision 91.3%, Recall 89.4%")
         
         _PADDLE_OCR = PaddleOCR(**kwargs)
         return _PADDLE_OCR
     except Exception as e:
-        print(f"⚠️ PaddleOCR init failed -> fallback: {e}")
-        _PADDLE_OCR = None
-        return None
+        error_msg = str(e)
+        # 'Global' 키 에러인 경우 더 명확한 메시지
+        if "'Global'" in error_msg or "Global" in error_msg:
+            raise RuntimeError(
+                f"❌ PaddleOCR 커스텀 모델 로드 실패: inference.yml에 Global 섹션이 없습니다.\n"
+                f"   경로: {CUSTOM_DET_MODEL_DIR / 'inference.yml'}\n"
+                f"   원본 에러: {error_msg}\n\n"
+                f"💡 해결 방법:\n"
+                f"   inference.yml 파일 상단에 Global: 섹션을 추가하세요:\n"
+                f"   Global:\n"
+                f"     algorithm: DB\n"
+                f"     use_gpu: false\n"
+                f"     use_pdserving: false\n"
+                f"     det_algorithm: DB"
+            ) from e
+        raise RuntimeError(
+            f"❌ PaddleOCR 커스텀 모델 로드 실패: {error_msg}\n"
+            f"   경로: {CUSTOM_DET_MODEL_DIR}\n"
+            f"   확인: inference.pdmodel 파일이 존재하는지 확인하세요."
+        ) from e
+
+
+def export_inference_model_auto() -> bool:
+    """
+    서버 실행 중 GPU 충돌을 방지하기 위해 CPU 모드로 변환을 시도합니다.
+    """
+    import subprocess
+    import shutil
+    
+    if not TRAINED_MODEL_PDPARAMS.exists():
+        print(f"❌ [자동 변환] 학습된 모델 파일을 찾을 수 없습니다: {TRAINED_MODEL_PDPARAMS}")
+        return False
+    
+    print("=" * 60)
+    print("🔄 [자동 변환] Inference 모델 생성 시도 중...")
+    print(f"   학습된 모델: {TRAINED_MODEL_PDPARAMS}")
+    print(f"   출력 경로: {CUSTOM_DET_MODEL_DIR}")
+    print("=" * 60)
+    
+    try:
+        if CUSTOM_DET_MODEL_DIR.exists():
+            try:
+                shutil.rmtree(CUSTOM_DET_MODEL_DIR)
+                print(f"🧹 기존 디렉토리 삭제 완료")
+            except Exception as e:
+                print(f"⚠️ 기존 디렉토리 삭제 실패: {e}")
+        
+        CUSTOM_DET_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
+        CUSTOM_DET_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+        paddle_root = PathLib("C:/Pyg/Tools/PaddleOCR").resolve()
+        if not paddle_root.exists():
+            print(f"❌ [자동 변환] PaddleOCR 도구 경로 없음: {paddle_root}")
+            return False
+        print(f"✅ PaddleOCR 도구 경로: {paddle_root}")
+        
+        export_script = paddle_root / "tools" / "export_model.py"
+        if not export_script.exists():
+            print(f"❌ [자동 변환] export_model.py 없음: {export_script}")
+            return False
+        print(f"✅ export_script: {export_script}")
+
+        venv_ocr_python = PathLib(__file__).parent.parent / "venv_ocr" / "Scripts" / "python.exe"
+        if not venv_ocr_python.exists():
+            venv_ocr_python = PathLib(__file__).parent.parent.parent / "venv_ocr" / "Scripts" / "python.exe"
+            if not venv_ocr_python.exists():
+                print(f"❌ [자동 변환] venv_ocr Python 없음: {venv_ocr_python}")
+                return False
+        print(f"✅ venv_ocr Python: {venv_ocr_python}")
+        
+        config_file = PathLib(__file__).parent / "paddle_train" / "configs" / "det_ke_finetune.yml"
+        if not config_file.exists():
+            print(f"❌ [자동 변환] 설정 파일 없음: {config_file}")
+            return False
+        print(f"✅ 설정 파일: {config_file}")
+
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
+        # FLAGS_selected_gpus는 빈 문자열이면 오류 발생, 아예 설정하지 않음
+        if "FLAGS_selected_gpus" in env:
+            del env["FLAGS_selected_gpus"]
+        env["PADDLE_INFERENCE_PLACE"] = "cpu"
+        env["USE_GPU"] = "0"
+        env["FLAGS_use_gpu"] = "0"
+        env["FLAGS_use_cuda"] = "0"
+        
+        paddleocr_path = str(paddle_root)
+        if env.get('PYTHONPATH'):
+            if paddleocr_path not in env['PYTHONPATH']:
+                env['PYTHONPATH'] = f"{paddleocr_path};{env['PYTHONPATH']}" if os.name == 'nt' else f"{paddleocr_path}:{env['PYTHONPATH']}"
+        else:
+            env['PYTHONPATH'] = paddleocr_path
+        
+        print(f"🔒 GPU 격리: CUDA_VISIBLE_DEVICES=-1, PADDLE_INFERENCE_PLACE=cpu")
+
+        pretrained_opt = f'Global.pretrained_model="{TRAINED_MODEL_CHECKPOINT.resolve().as_posix()}"'
+        save_dir_opt = f'Global.save_inference_dir="{CUSTOM_DET_MODEL_DIR.resolve().as_posix()}"'
+        use_gpu_opt = 'Global.use_gpu=False'
+        # PaddlePaddle 2.6.2에서는 export_with_pir=False로 설정해야 AssertionError 방지
+        export_pir_opt = 'Global.export_with_pir=False'
+        
+        full_cmd_str = (
+            f'"{venv_ocr_python.resolve()}" "{export_script.as_posix()}" '
+            f'-c "{config_file.as_posix()}" '
+            f'-o {pretrained_opt} {save_dir_opt} {use_gpu_opt} {export_pir_opt}'
+        )
+        
+        print(f"🚀 실행 명령: {full_cmd_str}")
+        print(f"📂 작업 디렉토리: {paddle_root}")
+        print("-" * 60)
+        
+        result = subprocess.run(
+            full_cmd_str,
+            shell=True,
+            cwd=str(paddle_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=300
+        )
+        
+        print("-" * 60)
+        if result.returncode == 0:
+            if (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists():
+                # inference.yml에 model_name 추가 (PaddleOCR 3.3.2 요구사항)
+                inference_yml_path = CUSTOM_DET_MODEL_DIR / "inference.yml"
+                if inference_yml_path.exists():
+                    try:
+                        if yaml is None:
+                            raise ImportError("yaml 모듈이 설치되지 않았습니다. pip install pyyaml")
+                        with open(inference_yml_path, 'r', encoding='utf-8') as f:
+                            config = yaml.safe_load(f) or {}
+                        
+                        if "Global" not in config:
+                            config["Global"] = {}
+                        
+                        # model_name이 없으면 추가
+                        if "model_name" not in config["Global"]:
+                            config["Global"]["model_name"] = "PP-OCRv5_server_det"
+                            config["Global"]["model_type"] = "det"
+                            
+                            with open(inference_yml_path, 'w', encoding='utf-8') as f:
+                                yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                            print(f"✅ [자동 변환] inference.yml에 model_name 추가 완료")
+                    except Exception as e:
+                        print(f"⚠️ [자동 변환] inference.yml 수정 실패 (무시): {e}")
+                
+                print("✅ [자동 변환] 완료!")
+                print(f"   생성된 파일: {list(CUSTOM_DET_MODEL_DIR.iterdir())}")
+                return True
+            else:
+                print("⚠️ [자동 변환] 종료 코드는 0이지만 inference.pdmodel 파일이 없습니다.")
+                print(f"   디렉토리 내용: {list(CUSTOM_DET_MODEL_DIR.iterdir()) if CUSTOM_DET_MODEL_DIR.exists() else '디렉토리 없음'}")
+        else:
+            print(f"❌ [자동 변환] 실패 (종료 코드: {result.returncode})")
+            if result.stdout:
+                print("STDOUT:")
+                print(result.stdout[-1000:])  # 마지막 1000자만 출력
+            if result.stderr:
+                print("STDERR:")
+                print(result.stderr[-1000:])  # 마지막 1000자만 출력
+        
+        print("=" * 60)
+        
+        # 직접 명령 실행 실패 시 배치 파일 Fallback 시도
+        if result.returncode != 0:
+            print("💡 직접 변환 실패. 검증된 배치 파일로 Fallback 시도...")
+            bat_file = PathLib(__file__).parent / "paddle_train" / "04_export_inference_model.bat"
+            if bat_file.exists():
+                print(f"📜 배치 파일 실행: {bat_file}")
+                bat_result = subprocess.run(
+                    [str(bat_file)],
+                    shell=True,
+                    cwd=str(bat_file.parent),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=300
+                )
+                if bat_result.returncode == 0 and (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists():
+                    # inference.yml에 model_name 추가 (PaddleOCR 3.3.2 요구사항)
+                    inference_yml_path = CUSTOM_DET_MODEL_DIR / "inference.yml"
+                    if inference_yml_path.exists():
+                        try:
+                            if yaml is None:
+                                raise ImportError("yaml 모듈이 설치되지 않았습니다. pip install pyyaml")
+                            with open(inference_yml_path, 'r', encoding='utf-8') as f:
+                                config = yaml.safe_load(f) or {}
+                            
+                            if "Global" not in config:
+                                config["Global"] = {}
+                            
+                            # model_name이 없으면 추가
+                            if "model_name" not in config["Global"]:
+                                config["Global"]["model_name"] = "PP-OCRv5_server_det"
+                                config["Global"]["model_type"] = "det"
+                                
+                                with open(inference_yml_path, 'w', encoding='utf-8') as f:
+                                    yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                                print(f"✅ [배치 파일 Fallback] inference.yml에 model_name 추가 완료")
+                        except Exception as e:
+                            print(f"⚠️ [배치 파일 Fallback] inference.yml 수정 실패 (무시): {e}")
+                    
+                    print("✅ [배치 파일 Fallback] 변환 성공!")
+                    return True
+                else:
+                    print(f"❌ [배치 파일 Fallback] 실패 (종료 코드: {bat_result.returncode})")
+                    if bat_result.stdout:
+                        print("STDOUT:")
+                        print(bat_result.stdout[-500:])
+                    if bat_result.stderr:
+                        print("STDERR:")
+                        print(bat_result.stderr[-500:])
+        
+        print("💡 수동 변환: core/paddle_train/04_export_inference_model.bat 실행")
+        print("   서버를 완전히 종료한 후 배치 파일을 실행하세요 (GPU 경합 방지)")
+        return False
+        
+    except subprocess.TimeoutExpired:
+        print("❌ [자동 변환] 타임아웃 (5분 초과)")
+        print("💡 서버를 종료하고 core/paddle_train/04_export_inference_model.bat를 수동 실행하세요")
+        return False
+    except Exception as e:
+        import traceback
+        print(f"❌ [자동 변환] 예외 발생: {e}")
+        print(traceback.format_exc())
+        print("💡 서버를 종료하고 core/paddle_train/04_export_inference_model.bat를 수동 실행하세요")
+        return False
+
+
+def init_paddleocr_once():
+    """서버 시작 시 호출되는 초기화 함수 - PaddleOCR 인스턴스를 미리 생성하여 유지"""
+    global USE_CUSTOM_DET_MODEL, _PADDLE_OCR
+    
+    print("=" * 60)
+    print("🔄 [PaddleOCR] 서버 시작 시 초기화 중...")
+    print("=" * 60)
+    
+    USE_CUSTOM_DET_MODEL = (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists()
+    
+    if not USE_CUSTOM_DET_MODEL and TRAINED_MODEL_PDPARAMS.exists():
+        print("🔄 [PaddleOCR] Inference 모델 자동 변환 시도...")
+        export_inference_model_auto()
+        USE_CUSTOM_DET_MODEL = (CUSTOM_DET_MODEL_DIR / "inference.pdmodel").exists()
+    
+    try:
+        # PaddleOCR 인스턴스를 미리 생성하여 싱글톤으로 유지
+        ocr_instance = get_paddle_ocr(lang="korean", use_custom_det=True)
+        if ocr_instance is not None:
+            print(f"✅ [PaddleOCR] 초기화 완료! 인스턴스 유지됨 (id: {id(ocr_instance)})")
+        else:
+            print("⚠️ [PaddleOCR] 초기화 완료했지만 인스턴스가 None입니다")
+    except RuntimeError as e:
+        print(f"❌ [PaddleOCR] 초기화 실패: {e}")
+        print("⚠️ [PaddleOCR] 서버는 시작되지만 OCR은 작동하지 않습니다")
+    except Exception as e:
+        print(f"❌ [PaddleOCR] 초기화 중 예상치 못한 오류: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("=" * 60)
 
 
 def preprocess_for_paddle_code(bgr: np.ndarray, scale: int = 2) -> np.ndarray:
@@ -2468,18 +2804,36 @@ def paddleocr_words_from_bgr(bgr: np.ndarray) -> Tuple[List[WordBox], List, List
         - scores: 신뢰도 리스트
         - preprocessed_img: 전처리된 이미지 (시각화용)
     """
-    ocr = get_paddle_ocr(lang="korean", use_gpu=True, use_angle_cls=True)
-    if ocr is None:
-        return [], [], [], [], bgr
-    
-    # 전처리
+    # 전처리 (OCR 인스턴스 가져오기 전에 먼저 수행)
     img = preprocess_for_paddle_code(bgr, scale=2)
+    
+    # PaddleOCR 인스턴스 가져오기 (싱글톤 - 서버 시작 시 초기화됨)
+    try:
+        ocr = get_paddle_ocr(lang="korean", use_custom_det=True)
+        if ocr is None:
+            print("⚠️ [PaddleOCR] 인스턴스가 None입니다")
+            return [], [], [], [], img
+    except RuntimeError as e:
+        print(f"❌ [PaddleOCR] 인스턴스 가져오기 실패: {e}")
+        return [], [], [], [], img
+    except Exception as e:
+        print(f"⚠️ [PaddleOCR] 예상치 못한 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], [], [], [], img
     
     # OCR 실행
     try:
-        result = ocr.ocr(img, cls=True)
+        print(f"🔍 [PaddleOCR] OCR 실행 중... (이미지 크기: {img.shape})")
+        # PaddleOCR 3.3.2에서는 cls 파라미터 지원 안 함
+        result = ocr.ocr(img)
+        print(f"📊 [PaddleOCR] OCR 결과 타입: {type(result)}, 길이: {len(result) if result else 0}")
+        if result and len(result) > 0:
+            print(f"📊 [PaddleOCR] 첫 번째 결과 길이: {len(result[0]) if result[0] else 0}")
     except Exception as e:
-        print(f"⚠️ PaddleOCR 실행 실패: {e}")
+        print(f"⚠️ [PaddleOCR] OCR 실행 실패: {e}")
+        import traceback
+        traceback.print_exc()
         return [], [], [], [], img
     
     words: List[WordBox] = []
@@ -2488,24 +2842,367 @@ def paddleocr_words_from_bgr(bgr: np.ndarray) -> Tuple[List[WordBox], List, List
     scores = []
     
     if not result or not result[0]:
+        print(f"⚠️ [PaddleOCR] 인식된 토큰 없음 (result: {result})")
         return words, boxes, txts, scores, img
     
-    # result: [ [ [box, (text, score)], ... ] ]
-    for line in result[0]:
-        if not line:
+    # PaddleOCR 3.3.2는 PaddleX의 OCRResult 객체를 반환할 수 있음
+    image_results = result[0] if result else None
+    
+    print(f"🔍 [PaddleOCR] 결과 구조 분석:")
+    print(f"  - result[0] 타입: {type(image_results)}")
+    
+    # OCRResult 객체인 경우 속성 확인
+    if image_results is not None:
+        result_type_name = type(image_results).__name__
+        result_type_str = str(type(image_results))
+        # OCRResult 객체인지 확인 (다양한 형태의 클래스명 지원)
+        is_ocr_result = (
+            'OCRResult' in result_type_name or 
+            'OCRResult' in result_type_str or
+            hasattr(image_results, 'dt_polys') or 
+            hasattr(image_results, 'rec_text') or
+            hasattr(image_results, 'dt_boxes') or
+            hasattr(image_results, 'rec_texts')
+        )
+        
+        if is_ocr_result:
+            print(f"  - OCRResult 객체 감지됨")
+            # OCRResult 객체의 속성 확인
+            attrs = [a for a in dir(image_results) if not a.startswith('_')]
+            print(f"  - 사용 가능한 속성: {attrs[:15]}")
+            
+            # OCRResult 객체는 dict-like 객체이므로 items(), keys(), get() 사용 가능
+            # json 속성도 있으므로 활용 가능
+            
+            boxes_list = []
+            texts_list = []
+            scores_list = []
+            
+            # 1. dict-like 접근 시도
+            try:
+                ocr_dict = dict(image_results) if hasattr(image_results, 'items') else {}
+                print(f"  - dict 변환 성공: {list(ocr_dict.keys())[:10]}")
+                
+                # 가능한 키 이름 확인
+                for key in ocr_dict.keys():
+                    print(f"    키: {key}, 값 타입: {type(ocr_dict[key])}, 값 길이: {len(ocr_dict[key]) if hasattr(ocr_dict[key], '__len__') else 'N/A'}")
+                
+                # 박스 정보 (rec_polys 우선 - Recognition 완료된 정확한 박스)
+                if 'rec_polys' in ocr_dict:
+                    boxes_list = ocr_dict['rec_polys']
+                    print(f"  - 박스 사용: rec_polys (Recognition 박스)")
+                elif 'dt_polys' in ocr_dict:
+                    boxes_list = ocr_dict['dt_polys']
+                    print(f"  - 박스 사용: dt_polys (Detection 박스)")
+                elif 'dt_boxes' in ocr_dict:
+                    boxes_list = ocr_dict['dt_boxes']
+                    print(f"  - 박스 사용: dt_boxes")
+                elif 'boxes' in ocr_dict:
+                    boxes_list = ocr_dict['boxes']
+                    print(f"  - 박스 사용: boxes")
+                
+                # 텍스트 정보 (다양한 키 이름 시도)
+                for text_key in ['rec_text', 'rec_texts', 'texts', 'text', 'txt', 'rec_result', 'results']:
+                    if text_key in ocr_dict:
+                        texts_list = ocr_dict[text_key] if isinstance(ocr_dict[text_key], list) else [ocr_dict[text_key]]
+                        print(f"  - 텍스트 찾음: {text_key} ({len(texts_list)}개)")
+                        break
+                
+                # 점수 정보 (다양한 키 이름 시도)
+                for score_key in ['rec_score', 'rec_scores', 'scores', 'score', 'conf', 'confidence', 'rec_confidence']:
+                    if score_key in ocr_dict:
+                        scores_list = ocr_dict[score_key] if isinstance(ocr_dict[score_key], (list, tuple)) else [ocr_dict[score_key]]
+                        print(f"  - 점수 찾음: {score_key} ({len(scores_list)}개)")
+                        break
+            except Exception as e:
+                print(f"  - dict 변환 실패: {e}")
+            
+            # 2. json 속성 활용 시도
+            if not texts_list and hasattr(image_results, 'json'):
+                try:
+                    import json
+                    json_data = image_results.json if isinstance(image_results.json, dict) else json.loads(str(image_results.json))
+                    print(f"  - json 속성 타입: {type(json_data)}")
+                    if isinstance(json_data, dict):
+                        print(f"  - json 키: {list(json_data.keys())[:10]}")
+                        for key in json_data.keys():
+                            if 'text' in key.lower() or 'txt' in key.lower():
+                                texts_list = json_data[key] if isinstance(json_data[key], list) else [json_data[key]]
+                                print(f"  - json에서 텍스트 찾음: {key}")
+                            if 'score' in key.lower() or 'conf' in key.lower():
+                                scores_list = json_data[key] if isinstance(json_data[key], (list, tuple)) else [json_data[key]]
+                                print(f"  - json에서 점수 찾음: {key}")
+                except Exception as e:
+                    print(f"  - json 처리 실패: {e}")
+            
+            # 3. 직접 속성 접근 (fallback)
+            if not boxes_list:
+                # rec_polys 우선 (Recognition 완료된 정확한 박스)
+                if hasattr(image_results, 'rec_polys'):
+                    boxes_list = image_results.rec_polys
+                    print(f"  - 박스 사용: rec_polys (속성 직접 접근)")
+                elif hasattr(image_results, 'dt_polys'):
+                    boxes_list = image_results.dt_polys
+                    print(f"  - 박스 사용: dt_polys (속성 직접 접근)")
+                elif hasattr(image_results, 'dt_boxes'):
+                    boxes_list = image_results.dt_boxes
+                    print(f"  - 박스 사용: dt_boxes (속성 직접 접근)")
+                elif hasattr(image_results, 'boxes'):
+                    boxes_list = image_results.boxes
+                    print(f"  - 박스 사용: boxes (속성 직접 접근)")
+            
+            if not texts_list:
+                for attr in ['rec_text', 'rec_texts', 'texts', 'text']:
+                    if hasattr(image_results, attr):
+                        val = getattr(image_results, attr)
+                        texts_list = val if isinstance(val, list) else [val]
+                        break
+            
+            if not scores_list:
+                for attr in ['rec_score', 'rec_scores', 'scores', 'score']:
+                    if hasattr(image_results, attr):
+                        val = getattr(image_results, attr)
+                        scores_list = val if isinstance(val, (list, tuple)) else [val]
+                        break
+            
+            print(f"  - 박스 개수: {len(boxes_list) if boxes_list else 0}")
+            print(f"  - 텍스트 개수: {len(texts_list) if texts_list else 0}")
+            print(f"  - 점수 개수: {len(scores_list) if scores_list else 0}")
+            
+            # 샘플 텍스트 출력 (디버깅)
+            if texts_list and len(texts_list) > 0:
+                sample_texts = texts_list[:3]
+                print(f"  - 텍스트 샘플 (처음 3개): {sample_texts}")
+            
+            # 박스와 텍스트를 매칭하여 처리
+            if boxes_list and texts_list:
+                # 개수가 일치해야 함
+                min_len = min(len(boxes_list), len(texts_list))
+                print(f"  - 매칭할 항목 개수: {min_len}")
+                
+                processed_count = 0
+                skipped_count = 0
+                
+                for idx in range(min_len):
+                    try:
+                        box = boxes_list[idx]
+                        text = texts_list[idx] if idx < len(texts_list) else ""
+                        score = float(scores_list[idx]) if scores_list and idx < len(scores_list) else 0.0
+                        
+                        # 텍스트가 None이거나 비어있으면 스킵
+                        if text is None:
+                            if idx < 3:
+                                print(f"  ⚠ 항목 {idx}: text가 None")
+                            skipped_count += 1
+                            continue
+                        
+                        # box 좌표 처리 - numpy.ndarray, list, tuple 모두 지원
+                        xs = []
+                        ys = []
+                        
+                        # numpy.ndarray 처리
+                        if isinstance(box, np.ndarray):
+                            # numpy 배열을 리스트로 변환
+                            box = box.tolist()
+                        
+                        # box 형식 확인 및 좌표 추출
+                        if isinstance(box, (list, tuple)) and len(box) >= 4:
+                            # box는 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] 형식
+                            for point in box:
+                                if isinstance(point, np.ndarray):
+                                    point = point.tolist()
+                                
+                                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                                    try:
+                                        xs.append(float(point[0]))
+                                        ys.append(float(point[1]))
+                                    except (ValueError, TypeError, IndexError):
+                                        pass
+                        else:
+                            if idx < 3:
+                                print(f"  ⚠ 항목 {idx}: box 형식 문제 (타입: {type(box)}, 길이: {len(box) if hasattr(box, '__len__') else 'N/A'})")
+                            skipped_count += 1
+                            continue
+                        
+                        if not xs or not ys or len(xs) < 4 or len(ys) < 4:
+                            if idx < 3:
+                                print(f"  ⚠ 항목 {idx}: 좌표 파싱 실패 (xs: {len(xs)}, ys: {len(ys)})")
+                            skipped_count += 1
+                            continue
+                        
+                        x1, y1 = float(min(xs)), float(min(ys))
+                        x2, y2 = float(max(xs)), float(max(ys))
+                        w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
+                        
+                        # 텍스트 정규화
+                        text = str(text).strip()
+                        if not text or text == "":
+                            skipped_count += 1
+                            continue
+                        
+                        # 전각→반각 정규화만 (의미 변경 금지)
+                        text = text.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+                        text = text.replace("；", ";").replace("﹔", ";")
+                        text = text.replace("，", ",").replace("．", ".")
+                        text = text.replace("—", "-").replace("–", "-")
+                        text = CTRL_RE.sub("", text)
+                        text = text.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+                        text = EMOJI_RE.sub("", text)
+                        text = text.strip()
+                        
+                        if not text:
+                            skipped_count += 1
+                            continue
+                        
+                        # WordBox 생성
+                        words.append(WordBox(text=text, x=x1, y=y1, w=w, h=h, conf=score))
+                        boxes.append(box)
+                        txts.append(text)
+                        scores.append(score)
+                        processed_count += 1
+                        
+                        if processed_count <= 5:  # 처음 5개만 상세 출력
+                            print(f"  ✓ 단어 {processed_count}: '{text}' (score: {score:.2f}, box: ({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f}))")
+                    
+                    except Exception as e:
+                        skipped_count += 1
+                        if idx < 3:  # 처음 3개 에러만 출력
+                            print(f"  ⚠ 항목 {idx} 처리 중 오류: {e}")
+                        import traceback
+                        if idx == 0:  # 첫 항목만 전체 traceback
+                            traceback.print_exc()
+                
+                print(f"  - 처리 완료: {processed_count}개, 스킵: {skipped_count}개")
+                print(f"✅ [PaddleOCR] {len(words)}개 단어 인식 완료 (OCRResult 객체에서 추출)")
+                return words, boxes, txts, scores, img
+            else:
+                print(f"  ⚠ 박스 또는 텍스트 리스트가 비어있음 (boxes: {len(boxes_list) if boxes_list else 0}, texts: {len(texts_list) if texts_list else 0})")
+        
+        # 리스트 형식인 경우 (기존 로직)
+        if isinstance(image_results, (list, tuple)):
+            print(f"  - result[0] 길이: {len(image_results)}")
+            if len(image_results) > 0:
+                first_item = image_results[0]
+                print(f"  - 첫 항목 타입: {type(first_item)}")
+                print(f"  - 첫 항목 길이: {len(first_item) if isinstance(first_item, (list, tuple)) else 'N/A'}")
+        else:
+            print(f"  - 예상치 못한 형식입니다")
+    
+    # OCRResult 객체가 처리되지 않은 경우 리스트로 처리
+    # (OCRResult 객체는 이미 위에서 처리되어 return 되었을 것)
+    
+    # result[0]의 각 항목 처리 (리스트인 경우)
+    if not isinstance(image_results, (list, tuple)):
+        # 리스트가 아닌 경우는 이미 위에서 처리되었거나 예외 상황
+        print(f"  ⚠ 리스트가 아닌 형식이지만 처리되지 않음: {type(image_results)}")
+        print(f"✅ [PaddleOCR] {len(words)}개 단어 인식 완료")
+        return words, boxes, txts, scores, img
+    
+    for idx, line_item in enumerate(image_results):
+        if line_item is None:
             continue
-        for item in line:
-            if len(item) < 2:
-                continue
+        
+        # line_item이 직접 [box, (text, score)] 형식인지 확인
+        if isinstance(line_item, (list, tuple)) and len(line_item) >= 2:
+            box = line_item[0]
+            text_info = line_item[1]
             
-            box = item[0]  # 4 points: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            text_info = item[1]  # (text, score)
-            
-            if not box or not text_info:
-                continue
-            
-            text = text_info[0] if isinstance(text_info, (list, tuple)) else str(text_info)
-            score = float(text_info[1]) if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 0.0
+            # box가 4점 좌표 리스트인지 확인
+            if isinstance(box, (list, tuple)) and len(box) >= 4:
+                # 직접 항목: [box, (text, score)]
+                if text_info is None:
+                    print(f"  ⚠ 항목 {idx}: text_info가 None")
+                    continue
+                
+                # 텍스트 추출
+                if isinstance(text_info, (list, tuple)):
+                    text = str(text_info[0]) if len(text_info) > 0 else ""
+                    score = float(text_info[1]) if len(text_info) > 1 else 0.0
+                else:
+                    text = str(text_info)
+                    score = 0.0
+                
+                # 박스 좌표 처리
+                xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                ys = [float(p[1]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                
+                if not xs or not ys:
+                    print(f"  ⚠ 항목 {idx}: box 좌표 파싱 실패 (xs={len(xs)}, ys={len(ys)})")
+                    continue
+                
+                x1, y1 = float(min(xs)), float(min(ys))
+                x2, y2 = float(max(xs)), float(max(ys))
+                w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
+                
+                # 전각→반각 정규화만 (의미 변경 금지)
+                text = text.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+                text = text.replace("；", ";").replace("﹔", ";")
+                text = text.replace("，", ",").replace("．", ".")
+                text = text.replace("—", "-").replace("–", "-")
+                text = CTRL_RE.sub("", text)  # 제어문자 제거
+                text = text.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")  # BOM/zero-width 제거
+                text = EMOJI_RE.sub("", text)  # 이모지 제거
+                
+                text = text.strip()
+                if not text:
+                    print(f"  ⚠ 항목 {idx}: 텍스트가 비어있음 (정규화 후)")
+                    continue
+                
+                # WordBox 생성
+                words.append(WordBox(text=text, x=x1, y=y1, w=w, h=h, conf=score))
+                boxes.append(box)
+                txts.append(text)
+                scores.append(score)
+                print(f"  ✓ 단어 {len(words)}: '{text}' (score: {score:.2f})")
+            else:
+                # 중첩 구조: line_item이 또 다른 리스트를 포함하는 경우
+                # 예: [[[box, (text, score)], ...]]
+                print(f"  🔄 항목 {idx}: 중첩 구조로 처리 시도 (box 타입: {type(box)})")
+                if isinstance(line_item, (list, tuple)):
+                    for sub_idx, sub_item in enumerate(line_item):
+                        if not isinstance(sub_item, (list, tuple)) or len(sub_item) < 2:
+                            continue
+                        
+                        box = sub_item[0]
+                        text_info = sub_item[1]
+                        
+                        if box is None or text_info is None:
+                            continue
+                        
+                        text = text_info[0] if isinstance(text_info, (list, tuple)) else str(text_info)
+                        score = float(text_info[1]) if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 0.0
+                        
+                        # 박스 좌표 처리
+                        if isinstance(box, (list, tuple)) and len(box) >= 4:
+                            xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            ys = [float(p[1]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            
+                            if not xs or not ys:
+                                continue
+                            
+                            x1, y1 = float(min(xs)), float(min(ys))
+                            x2, y2 = float(max(xs)), float(max(ys))
+                            w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
+                            
+                            # 전각→반각 정규화만 (의미 변경 금지)
+                            text = text.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
+                            text = text.replace("；", ";").replace("﹔", ";")
+                            text = text.replace("，", ",").replace("．", ".")
+                            text = text.replace("—", "-").replace("–", "-")
+                            text = CTRL_RE.sub("", text)  # 제어문자 제거
+                            text = text.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")  # BOM/zero-width 제거
+                            text = EMOJI_RE.sub("", text)  # 이모지 제거
+                            
+                            text = text.strip()
+                            if not text:
+                                continue
+                            
+                            # WordBox 생성
+                            words.append(WordBox(text=text, x=x1, y=y1, w=w, h=h, conf=score))
+                            boxes.append(box)
+                            txts.append(text)
+                            scores.append(score)
+                            print(f"  ✓ 단어 {len(words)}: '{text}' (score: {score:.2f})")
             
             # 전각→반각 정규화만 (의미 변경 금지)
             text = text.replace("：", ":").replace("﹕", ":").replace("∶", ":").replace("ː", ":")
@@ -2539,6 +3236,7 @@ def paddleocr_words_from_bgr(bgr: np.ndarray) -> Tuple[List[WordBox], List, List
             txts.append(text)
             scores.append(score)
     
+    print(f"✅ [PaddleOCR] {len(words)}개 단어 인식 완료")
     return words, boxes, txts, scores, img
 
 
@@ -2572,7 +3270,8 @@ def image_to_text_paddle(
     if not PADDLEOCR_AVAILABLE:
         raise RuntimeError("PaddleOCR가 설치되지 않았습니다. pip install paddlepaddle paddleocr")
     
-    ocr = get_paddle_ocr(lang="korean", use_gpu=True, use_angle_cls=True)
+    # PaddleOCR 3.3.2 호환: use_gpu, use_angle_cls 파라미터는 내부에서 처리됨
+    ocr = get_paddle_ocr(lang="korean", use_custom_det=True)
     if ocr is None:
         raise RuntimeError("PaddleOCR 초기화 실패")
     
@@ -2595,7 +3294,8 @@ def image_to_text_paddle(
     
     # OCR 실행
     try:
-        result = ocr.ocr(img_array, cls=True)
+        # PaddleOCR 3.3.2에서는 cls 파라미터 지원 안 함
+        result = ocr.ocr(img_array)
     except Exception as e:
         raise RuntimeError(f"PaddleOCR 실행 실패: {e}")
     

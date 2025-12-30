@@ -24,6 +24,8 @@ venv_ocr/
 
 # OCR / Paddle outputs
 outputs/
+# output/ 폴더는 무시하지만, det_ke_model/best_accuracy.pdparams는 예외
+# 주의: 예외 규칙은 무시 규칙 바로 아래에 와야 함
 output/
 !output/det_ke_model/
 !output/det_ke_model/best_accuracy.pdparams
@@ -40,9 +42,11 @@ S:/OCR_Data/
 # Jupyter
 .ipynb_checkpoints/
 
-# Models
+# Models (모든 .pdparams, .pdopt, .pdmodel 무시)
 *.pdparams
 *.pdopt
 *.pdmodel
+
 # 예외: gonida 브랜치에서 best_accuracy.pdparams 파일은 커밋
+# 주의: 이 규칙은 위의 *.pdparams 규칙보다 뒤에 와야 함
 !output/det_ke_model/best_accuracy.pdparams

@@ -16,7 +16,7 @@ from core.analyzer import (
     INPUT_FILE,
     OUTPUT_JSON,
 )
-from core.capture import capture_and_ocr
+from core.capture import capture_and_ocr, init_paddleocr_once
 
 app = FastAPI(title="TaskFlow Analyzer", version="1.0.0")
 
@@ -42,6 +42,8 @@ OUTPUTS_DIR.mkdir(exist_ok=True)
 def startup():
     # 모델은 서버 시작 시 1회 로딩
     load_model_once()
+    # PaddleOCR도 서버 시작 시 미리 초기화 (커스텀 모델 자동 로드)
+    init_paddleocr_once()
 
 
 @app.get("/health")

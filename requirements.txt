@@ -89,3 +89,11 @@ wcwidth==0.2.14
 fastapi==0.123.9
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
+
+# OCR 관련 패키지
+mss>=9.0.0
+pyperclip>=1.8.2
+pytesseract>=0.3.10
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
+opencv-python>=4.8.0
