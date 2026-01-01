@@ -1,81 +1,97 @@
-## 환경설정
+# AI Models 프로젝트
 
-이 프로젝트는 **FastAPI + PyTorch + Transformers 기반 코드 분석/시각화 서버**입니다.  
-Windows 환경에서 아래 순서대로 준비해 주세요.
+FastAPI + PyTorch + Transformers 기반 코드 분석/시각화 서버 및 PaddleOCR 코드 문법 인식 모델 학습 프로젝트입니다.
 
-- **Python 버전**
+## 빠른 시작
 
-  - Python 3.12.10
+### 기본 서버 실행
 
-- **가상환경 생성 및 활성화 (예시)**
+자세한 내용은 [README.md](./README.md)의 환경 설정 섹션을 참조하세요.
 
-```bash
-cd yuzyproject-aimodels
-python -m venv venv
-venv\Scripts
-activate
+### OCR 모델 학습
+
+**데이터셋 생성부터 학습 시작까지의 전체 가이드**: [SETUP_GUIDE.md](./SETUP_GUIDE.md)를 참조하세요.
+
+빠른 요약:
+
+1. **환경 설정**
+   ```bash
+   python -m venv venv_ocr
+   venv_ocr\Scripts\activate
+   pip install paddlepaddle-gpu==3.2.0 -f https://www.paddlepaddle.org.cn/whl/linux/mkl/avx/stable.html
+   cd ../PaddleOCR && pip install -r requirements.txt
+   cd ../yuzyproject-aimodels && pip install -r requirements.txt
+   ```
+
+2. **데이터셋 생성**
+   ```bash
+   python prepare_code_syntax_dataset.py
+   ```
+
+3. **학습 시작**
+   ```bash
+   start_training_clean.bat
+   ```
+
+## 프로젝트 구조
+
+```
+yuzyproject-aimodels/
+├── core/                      # 핵심 모듈
+│   ├── analyzer.py            # 코드 분석 (LLM 기반)
+│   └── capture.py             # OCR 캡처 기능
+├── prepare_code_syntax_dataset.py  # 데이터셋 생성 스크립트
+├── SETUP_GUIDE.md            # 상세 설정 가이드 (데이터셋 생성 + 학습)
+├── README_OCR_TRAINING.md    # OCR 학습 빠른 시작 가이드
+└── requirements.txt          # Python 패키지 목록
 ```
 
-- **필수 파이썬 패키지 설치 (requirements 전체 설치)**  
-  `requirements.txt`에 이 프로젝트에 필요한 의존성이 모두 정의되어 있습니다.
+## 주요 기능
 
-```bash
-pip install -r requirements.txt
-```
+### 1. 코드 분석 (LLM 기반)
 
-- **주요 의존성 (개별 설치가 필요할 때 참고용)**
-  - **모델 관련**: `torch`, `torchvision`, `torchaudio`, `transformers`, `accelerate`, `safetensors`
-  - **웹 서버**: `fastapi`, `uvicorn[standard]`, `python-multipart`
-  - **클라우드/LLM 연동**: `openai`, `google-generativeai`, `google-api-python-client`
+- FastAPI 서버를 통한 코드 분석 API
+- Qwen2.5-Coder 모델 사용
+- 프로젝트 전체 코드 구조 분석 및 시각화
 
-개별 설치가 필요하다면 예를 들어 아래처럼 설치할 수 있습니다.
+### 2. OCR 코드 문법 인식
 
-```bash
-pip install torch torchvision torchaudio
-pip install transformers accelerate safetensors
-pip install fastapi "uvicorn[standard]" python-multipart
-pip install openai google-generativeai google-api-python-client
-```
+- PaddleOCR 기반 코드 이미지 인식
+- 코드 문법 특화 데이터셋으로 학습
+- 한글 + 영어 + 코드 기호 인식
 
-- **Windows OCR(캡처 기능) 관련 패키지**  
-  화면 캡처 후 드래그 영역을 OCR 하는 기능을 사용하려면 아래 winrt 패키지들도 추가로 설치해야 합니다.
+## 환경 설정
 
-```bash
-pip install -U winrt-runtime
-pip install -U winrt-Windows.Foundation winrt-Windows.Foundation.Collections
-pip install -U winrt-Windows.Media.Ocr winrt-Windows.Globalization winrt-Windows.Graphics.Imaging winrt-Windows.Storage.Streams
-```
+이 프로젝트는 **Windows 환경**에서 개발되었습니다.
 
-## 실행 방법
+- **Python**: 3.12.10
+- **가상환경**: `venv_ocr` (OCR 학습용)
 
-FastAPI 서버를 띄워서 프론트엔드(Next.js)에서 호출하거나, 직접 API를 호출해서 사용할 수 있습니다.
+자세한 환경 설정 방법은 [README.md](./README.md)를 참조하세요.
 
-1. **가상환경 활성화**
+## 데이터셋 및 학습
 
-```bash
-cd yuzyproject-aimodels
-venv\Scripts
-activate
-```
+- **데이터셋 생성**: `prepare_code_syntax_dataset.py`
+- **학습 설정**: `PaddleOCR/configs/rec/rec_code_syntax_finetune.yml`
+- **학습 실행**: `start_training_clean.bat`
 
-2. **서버 실행 (개발용)**
+**상세 가이드**: [SETUP_GUIDE.md](./SETUP_GUIDE.md) 참조
 
-```bash
-uvicorn main:app --reload
+## Git 무시 항목
 
-# 에러나는 경우는 이렇게 실행하세요
-python -m uvicorn main:app --reload
-```
+다음 항목들은 Git에 업로드되지 않습니다 (`.gitignore` 참조):
 
-3. **기본 동작 확인**
+- `venv_ocr/` - 가상환경
+- `code_syntax_dataset/` - 데이터셋 (대용량)
+- `output_root/` - 학습된 모델 파일
+- `outputs/` - 임시 출력 파일
+- `*.pdparams` - PaddleOCR 체크포인트
 
-   - 브라우저에서 `http://localhost:8000/health` 접속 → `{ "ok": true }` 응답이 오면 정상입니다.
+## 참고 문서
 
-4. **주요 엔드포인트**
-   - **`POST /analyze`**
-     - 코드 분석
-   - **`POST /visualize`**
-     - JSON Body: `{ "code": "<프로젝트 전체 코드 텍스트>" }`
-     - 분석 결과 JSON 반환 (프론트엔드 시각화용)
-   - **`POST /capture`**
-     - Windows 화면에서 드래그로 선택한 영역을 캡처 후 OCR 수행, 결과 텍스트를 JSON으로 반환
+- [SETUP_GUIDE.md](./SETUP_GUIDE.md) - 데이터셋 생성 및 학습 전체 가이드
+- [README_OCR_TRAINING.md](./README_OCR_TRAINING.md) - OCR 학습 빠른 시작
+
+## 라이센스
+
+이 프로젝트의 라이센스 정보는 저장소 루트의 LICENSE 파일을 참조하세요.
