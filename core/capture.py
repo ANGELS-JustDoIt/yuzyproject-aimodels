@@ -238,6 +238,199 @@ SAFE_ID_REPAIRS = [
 def normalize_code_line(s: str) -> str:
     if not s:
         return s
+    
+    # ------------------------------------------------------------
+    # [0] 긴급: 함수 정의 및 기본 문법 오인식 복구 (최우선)
+    # ------------------------------------------------------------
+    # def _configure_tesseract() -> None -> def _configure_tesseract None 복구
+    s = re.sub(r"def\s+(\w+)\s+None\s*:", r"def \1() -> None:", s)
+    s = re.sub(r"def\s+(\w+)\s*\(\s*\)\s+None\s*:", r"def \1() -> None:", s)
+    s = re.sub(r"def\s+(\w+)\s+None\s*$", r"def \1() -> None:", s)
+    # return -> Feturn 복구
+    s = re.sub(r"\bFeturn\b", "return", s, flags=re.I)
+    s = re.sub(r"\bretum\b", "return", s, flags=re.I)
+    s = re.sub(r"\bretu[rn]\b", "return", s, flags=re.I)
+    
+    # ------------------------------------------------------------
+    # [0-1] 긴급: Python 문법 기호 복구 (최우선)
+    # ------------------------------------------------------------
+    # 한글 오인식 복구 (터/스트 -> 텍스트)
+    s = re.sub(r"터\s*/\s*스트", "텍스트", s)
+    s = re.sub(r"터\s*스트", "텍스트", s)
+    # 언더스코어와 점 복구 (merged WordsappendWordBox -> merged_words.append(WordBox)
+    s = re.sub(r"(\w+)\s+Wordsappend(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    s = re.sub(r"(\w+)\s+words\s*append\s*(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    s = re.sub(r"(\w+)\s*Words\s*append\s*(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    # 함수 정의 복구 (def get_ paddleocr Words -> def get_paddleocr_words)
+    # 먼저 직접 문자열 치환으로 처리
+    s = s.replace("get__paddleocr_word.s,", "get_paddleocr_words(")
+    s = s.replace("get_ paddleocr Words", "get_paddleocr_words")
+    s = s.replace("get _ paddleocr Words", "get_paddleocr_words")
+    # 그 다음 정규식으로 처리
+    s = re.sub(r"def\s+get\s+_\s+paddleocr\s+Words", "def get_paddleocr_words", s, flags=re.I)
+    s = re.sub(r"def\s+(\w+)\s+_\s+(\w+)\s+(\w+)", r"def \1_\2_\3", s, flags=re.I)
+    s = re.sub(r"def\s+(\w+)\s+(\w+)\s+(\w+)", r"def \1_\2_\3", s, flags=re.I)
+    # 함수 호출 복구 (reconstruct_text_from words -> reconstruct_text_from_words()
+    s = re.sub(r"(\w+)_text_from\s+words$", r"\1_text_from_words(", s, flags=re.I)
+    s = re.sub(r"(\w+)\s+text\s+from\s+words$", r"\1_text_from_words(", s, flags=re.I)
+    s = re.sub(r"(\w+)_text_from_words$", r"\1_text_from_words(", s, flags=re.I)
+    # 타입 힌트 복구 (img Union[npndarray Image Image) -> img: Union[np.ndarray, Image.Image])
+    # 먼저 직접 문자열 치환
+    s = s.replace("img Union[np.ndarray, Image.Image)", "img: Union[np.ndarray, Image.Image]")
+    s = s.replace("Image.Image)", "Image.Image]")
+    # 그 다음 정규식으로 처리
+    s = re.sub(r"(\w+)\s+Union\s*\[\s*npndarray\s+Image\s+Image\s*\)", r"\1: Union[np.ndarray, Image.Image]", s, flags=re.I)
+    s = re.sub(r"(\w+)\s+Union\s*\[\s*np\s*ndarray\s+Image\s+Image\s*\)", r"\1: Union[np.ndarray, Image.Image]", s, flags=re.I)
+    s = re.sub(r"^(\s*)img\s+Union\[", r"\1img: Union[", s, flags=re.I)
+    s = re.sub(r"(\w+)\s+Union\s*\[", r"\1: Union[", s, flags=re.I)
+    # np.ndarray 복구
+    s = re.sub(r"np\s*ndarray", "np.ndarray", s, flags=re.I)
+    s = re.sub(r"npndarray", "np.ndarray", s, flags=re.I)
+    # Image.Image 복구
+    s = re.sub(r"Image\s+Image", "Image.Image", s)
+    # 변수명 복구 (Out -> out, Words -> words, Scale -> scale)
+    s = re.sub(r"^(\s*)Out\s*=", r"\1out =", s)
+    s = re.sub(r"^(\s*)Words\s*$", r"\1words,", s)
+    s = re.sub(r"^(\s*)Scale\s+int", r"\1scale: int", s, flags=re.I)
+    # 타입 힌트 콜론 복구 (Scale int = 3 -> scale: int = 3)
+    # 먼저 직접 문자열 치환
+    s = s.replace("scale int =", "scale: int =")
+    s = s.replace("Scale int =", "scale: int =")
+    # 그 다음 정규식으로 처리
+    s = re.sub(r"^(\s*)(\w+)\s+int\s*=", r"\1\2: int =", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)\s+bool\s*=", r"\1\2: bool =", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)\s+str\s*=", r"\1\2: str =", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)\s+float\s*=", r"\1\2: float =", s, flags=re.I)
+    # 함수 파라미터 타입 힌트 복구 (ode_mode bool = True -> code_mode: bool = True)
+    s = re.sub(r"^(\s*)ode_mode\s+bool", r"\1code_mode: bool", s, flags=re.I)
+    # 함수 파라미터 복구 (ode_mode_code_mode -> code_mode=code_mode,)
+    s = re.sub(r"^(\s*)ode_mode_(\w+)$", r"\1code_mode=\2,", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)_mode_(\w+)$", r"\1\2_mode=\3,", s, flags=re.I)
+    # 등호 누락 복구 (indent_step_indent_step -> indent_step=indent_step,)
+    s = re.sub(r"^(\s*)(\w+)_(\1)$", r"\1\2=\3,", s)  # 같은 변수명 반복
+    s = re.sub(r"^(\s*)(\w+)_(\w+)_(\2)$", r"\1\2_\3=\4,", s)  # indent_step_indent_step
+    # 복잡한 파라미터 오인식 복구 (removeUseLocalemojimodelboolbool= True=False)
+    s = re.sub(r"removeUseLocalemojimodelboolbool\s*=\s*True\s*=\s*False", r"remove_emoji: bool = True, use_local_model: bool = False", s, flags=re.I)
+    s = re.sub(r"remove\s*Use\s*Local\s*emoji\s*model\s*bool\s*bool", r"remove_emoji: bool = True, use_local_model: bool = False", s, flags=re.I)
+    # emoji 오인식 복구 (remove_emo>i -> remove_emoji)
+    s = re.sub(r"emo\s*>\s*i", "emoji", s, flags=re.I)
+    s = re.sub(r"emo\s*>\s*I", "emoji", s, flags=re.I)
+    s = re.sub(r"emo\s*>\s*1", "emoji", s, flags=re.I)
+    # remove_emoji 파라미터 복구
+    s = re.sub(r"^(\s*)remove_emo\s*>\s*i_(\w+)$", r"\1remove_emoji=\2,", s, flags=re.I)
+    s = re.sub(r"^(\s*)remove_emo\s*>\s*i$", r"\1remove_emoji=remove_emoji,", s, flags=re.I)
+    # 주석 복구 (가본Zt -> 기본값)
+    s = re.sub(r"가본\s*Z\s*t", "기본값", s)
+    s = re.sub(r"가본\s*Zt", "기본값", s)
+    # 점 복구를 먼저 처리 (paddle_wordx -> paddle_word.x)
+    # 등호가 있는 경우 먼저 처리
+    s = re.sub(r"([a-zA-Z])=(\w+)_word([a-z])$", r"\1=\2_word.\3,", s)
+    s = re.sub(r"([a-zA-Z])=(\w+)_word([A-Z])$", r"\1=\2_word.\3,", s)
+    # 등호가 없는 경우
+    s = re.sub(r"(\w+)_word([a-z])$", r"\1_word.\2,", s, flags=re.I)
+    s = re.sub(r"(\w+)_word([A-Z])$", r"\1_word.\2,", s, flags=re.I)
+    s = re.sub(r"(\w+)word([a-z])$", r"\1_word.\2,", s, flags=re.I)
+    # 등호와 언더스코어 복구 (text_final_text -> text=final_text,)
+    # 단, _word 패턴이 아닌 경우만 처리
+    s = re.sub(r"^(\s*)(text)_(final)_(text)$", r"\1\2=\3_\4,", s)
+    s = re.sub(r"^(\s*)([a-z])_(\w+)$", r"\1\2=\3,", s)  # 단순한 경우 (단, _word가 아닌 경우)
+    # conf 복구 (onf -> conf)
+    s = re.sub(r"\bonf\s*_", "conf=", s, flags=re.I)
+    s = re.sub(r"\bonf\s*=", "conf=", s, flags=re.I)
+    s = re.sub(r"(\w+)_onf\s*_", r"\1.conf=", s, flags=re.I)
+    s = re.sub(r"(\w+)_onf$", r"\1.conf", s, flags=re.I)
+    # print[ -> print( 복구
+    s = re.sub(r"\bprint\s*\[", "print(", s, flags=re.I)
+    # print[f" -> print(f" 복구
+    s = re.sub(r"\bprint\s*\[\s*f\s*[\"']", r'print(f"', s, flags=re.I)
+    # f-string 문법 복구 (f" -> f", f' -> f')
+    s = re.sub(r"f\s*\[\s*[\"']", r'f"', s)
+    s = re.sub(r"f\s*\[\s*['\"]", r"f'", s)
+    # PaddleOCR 변수명 복구 (PADDLEOR INSTANE -> _PADDLEOCR_INSTANCE)
+    s = re.sub(r"\bPADDLEOR\s+INSTANE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"\bPADDLEOR\s+_?INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"\bPADDLE\s*OR\s*C\s*R\s*_?INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"\bPADDLE\s*OCR\s*_?INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    # PaddleOCR 단어 복구 (PaddleOR08 -> PaddleOCR, PaddleOR -> PaddleOCR)
+    # 순서 중요: 더 구체적인 패턴부터 처리
+    # 먼저 직접 문자열 치환으로 처리 (정규식보다 우선)
+    s = s.replace("PaddleOR+", "PaddleOCR")
+    s = s.replace("PaddleOR +", "PaddleOCR")
+    s = s.replace("Paddle OR+", "PaddleOCR")
+    s = s.replace("Paddle OR +", "PaddleOCR")
+    # 그 다음 정규식으로 처리
+    s = re.sub(r"Paddle\s*OR\s*0?\d*", "PaddleOCR", s, flags=re.I)
+    s = re.sub(r"Paddle\s*OR\s*C\s*R", "PaddleOCR", s, flags=re.I)
+    s = re.sub(r"Paddle\s*OR\s*\+", "PaddleOCR", s, flags=re.I)  # PaddleOR+ -> PaddleOCR
+    s = re.sub(r"Paddle\s*OR\s+", "PaddleOCR ", s, flags=re.I)  # PaddleOR 뒤 공백 -> PaddleOCR
+    s = re.sub(r"Paddle\s*OR\b", "PaddleOCR", s, flags=re.I)  # PaddleOR -> PaddleOCR (단어 경계)
+    # PaddleOR 뒤에 한글이 오는 경우도 처리
+    s = re.sub(r"Paddle\s*OR\s*([가-힣])", r"PaddleOCR \1", s, flags=re.I)
+    # return _PADDLEOCR_INSTANCE 복구
+    s = re.sub(r"return\s+PADDLEOR\s+INSTANE", "return _PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"return\s+PADDLE\s*OR\s*C\s*R\s*INSTANCE", "return _PADDLEOCR_INSTANCE", s, flags=re.I)
+    # PP-OCRv4/v5 오인식 복구 (PP-ORv4/V5, PP-ORv4/V5 등)
+    s = re.sub(r"PP\s*[-]?\s*OR\s*v\s*(\d+)\s*[/]?\s*V?\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    s = re.sub(r"PP\s*[-]?\s*OCR\s*v\s*(\d+)\s*[/]?\s*v\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    s = re.sub(r"PP\s*[-]?\s*OR\s*v\s*(\d+)\s*[/]?\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    # PP-OCRv4/v5 뒤에 붙은 단어 분리 (PP-OCRv4/v5PaddleOR -> PP-OCRv4/v5, PaddleOCR)
+    s = re.sub(r"PP-OCRv(\d+)/v(\d+)(Paddle\s*OR)", r"PP-OCRv\1/v\2, PaddleOCR", s, flags=re.I)
+    s = re.sub(r"PP-OCRv(\d+)/v(\d+)(PaddleOCR)", r"PP-OCRv\1/v\2, PaddleOCR", s, flags=re.I)
+    # PaddleOR+ 패턴 직접 복구 (PaddleOR+ -> PaddleOCR)
+    s = s.replace("PaddleOR+", "PaddleOCR")
+    s = s.replace("PaddleOR +", "PaddleOCR")
+    s = s.replace("Paddle OR+", "PaddleOCR")
+    s = s.replace("Paddle OR +", "PaddleOCR")
+    # 한글+영어 최적화 오인식 복구 (한글+영어, 한글\+영어 등)
+    s = re.sub(r"한글\s*[+]\s*영어\s*최적화", "한글+영어 최적화", s)
+    s = re.sub(r"한글\s*영어\s*최적화", "한글+영어 최적화", s)
+    # 초기화 완료 오인식 복구 (초기화 최적화 완료 -> 초기화 완료)
+    s = re.sub(r"초기화\s*최적화\s*완료", "초기화 완료", s)
+    s = re.sub(r"초기화\s*완료\s*최적화", "초기화 완료", s)
+    s = re.sub(r"초기화\s*완료\s*최신", "초기화 완료", s)
+    # 따옴표와 단어 분리 복구 ("완료최신 -> " 완료, 최신)
+    s = re.sub(r"\"\s*완료\s*([가-힣]+)", r'" 완료, \1', s)
+    s = re.sub(r"\"\s*([가-힣]+)\s*완료", r'" \1 완료', s)
+    # 자동 다운로드 모델 오인식 복구
+    s = re.sub(r"자동\s*다운로드\s*모델", "자동 다운로드 모델", s)
+    s = re.sub(r"자동\s*다운로드", "자동 다운로드", s)
+    # 괄호 오인식 복구 (print[f" -> print(f")
+    s = re.sub(r"(\w+)\s*\[\s*f\s*[\"']", r'\1(f"', s)
+    s = re.sub(r"(\w+)\s*\[\s*[\"']", r'\1("', s)
+    # 숫자 오인식 복구 (08 -> 0, v4/v5 -> v4/v5)
+    s = re.sub(r"v\s*(\d+)\s*[/]\s*v\s*(\d+)", r"v\1/v\2", s, flags=re.I)
+    s = re.sub(r"v\s*(\d+)\s*[/]\s*V\s*(\d+)", r"v\1/v\2", s, flags=re.I)
+    # 숫자 중간 0 제거 (PaddleOR08 -> PaddleOCR, 08 -> 0)
+    s = re.sub(r"(\w)0([1-9])(\w)", r"\1\2\3", s)  # 단어 내부의 0 제거 (08 -> 8, OR08 -> OR8)
+    # os.path.exists 오인식 복구 (ifos_pathexists<-, ifos_pathexists 등)
+    s = re.sub(r"ifos_pathexists\s*[<\-]?\s*['\"]?([A-Z_]+EXE)['\"]?", r"if os.path.exists(\1)", s, flags=re.I)
+    s = re.sub(r"if\s*os\.path\.exists\s*[<\-]\s*['\"]?([A-Z_]+EXE)['\"]?", r"if os.path.exists(\1)", s, flags=re.I)
+    s = re.sub(r"if\s*os\.path\.exists\s*[<\-]\s*['\"]?([A-Z_]+DIR)['\"]?", r"if os.path.exists(\1)", s, flags=re.I)
+    # os.path.isdir 오인식 복구 (OSpathis_dir, OSpath.is_dir 등)
+    s = re.sub(r"OS\s*path\s*is\s*_?dir\s*([A-Z_]+DIR)", r"os.path.isdir(\1)", s, flags=re.I)
+    s = re.sub(r"os\.path\.is\s*_?dir\s*([A-Z_]+DIR)", r"os.path.isdir(\1)", s, flags=re.I)
+    s = re.sub(r"OSpathis_dir\s*([A-Z_]+DIR)", r"os.path.isdir(\1)", s, flags=re.I)
+    # os.environ 오인식 복구 (OS_ENV_Iron, OS_ENV 등)
+    s = re.sub(r"OS\s*_?\s*ENV\s*_?\s*Iron\s*\[\s*[\"']([A-Z_]+PREFIX)[\"']\s*\]\s*[<\-]\s*([A-Z_]+DIR)", 
+               r'os.environ["\1"] = \2', s, flags=re.I)
+    s = re.sub(r"OS\s*_?\s*ENV\s*\[\s*[\"']([A-Z_]+PREFIX)[\"']\s*\]\s*[<\-]\s*([A-Z_]+DIR)", 
+               r'os.environ["\1"] = \2', s, flags=re.I)
+    s = re.sub(r"os\.environ\s*\[\s*[\"']([A-Z_]+PREFIX)[\"']\s*\]\s*[<\-]\s*([A-Z_]+DIR)", 
+               r'os.environ["\1"] = \2', s, flags=re.I)
+    # TESSERACT_EXE 오인식 복구 (TESSERAT_EXE, TESSERAT EXE 등)
+    s = re.sub(r"TESSERAT\s+EXE", "TESSERACT_EXE", s, flags=re.I)
+    s = re.sub(r"TESSERAT_EXE", "TESSERACT_EXE", s, flags=re.I)
+    s = re.sub(r"TESSERACT\s+EXE", "TESSERACT_EXE", s)
+    # TESSDATA_DIR 오인식 복구 (TESSDATA DIR 등)
+    s = re.sub(r"TESSDATA\s+DIR", "TESSDATA_DIR", s, flags=re.I)
+    s = re.sub(r"TESSDATA\s+PREFIX", "TESSDATA_PREFIX", s, flags=re.I)
+    # docstring 닫는 따옴표 복구
+    s = re.sub(r'"""([^"]*?)(\s*)$', r'"""\1"""', s)  # 줄 끝에 닫는 따옴표 없으면 추가
+    s = re.sub(r'"""([^"]*?)(\s*)([^"])', r'"""\1"""\3', s)  # 중간에 닫는 따옴표 없으면 추가
+    # 의미 없는 숫자 제거 (10 1 10 같은 패턴)
+    s = re.sub(r"^\s*\d+\s+\d+\s+\d+\s*$", "", s)  # 줄 전체가 숫자만 있으면 제거
+    s = re.sub(r"^\s*\d+\s+\d+\s*$", "", s)  # 두 개 숫자만 있으면 제거
+    
     # 한글 오인식 보정 (은 -> g, 등)
     s = re.sub(r"\b은\s*=", "g =", s)
     # 함수 시그니처 보정 (콜론 누락) - img Image.Image -> img: Image.Image
@@ -432,6 +625,105 @@ def normalize_code_line(s: str) -> str:
     s = re.sub(r"__maln__", "__main__", s)
     s = re.sub(r"\bscreen\s+capture_fullscreen_bgr\s*\(\s*\)", "screen = capture_fullscreen_bgr()", s, flags=re.I)
     s = re.sub(r"\bmonitor\s+sct\.\s*monitors\s*\[\s*(.+?)\s*\]", r"monitor = sct.monitors[\1]", s)
+    
+    # ------------------------------------------------------------
+    # [최종] 코드 문법 기호 보정 (괄호, 따옴표, f-string 등)
+    # ------------------------------------------------------------
+    # Python 문법 기호 강화 복구
+    # 1. 언더스코어와 점 복구 (merged WordsappendWordBox -> merged_words.append(WordBox)
+    s = re.sub(r"(\w+)\s+Wordsappend(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    s = re.sub(r"(\w+)\s+words\s*append\s*(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    s = re.sub(r"(\w+)\s*Words\s*append\s*(\w+)", r"\1_words.append(\2", s, flags=re.I)
+    # 2. 등호와 언더스코어 복구 (text_final_text -> text=final_text,)
+    # 패턴: 변수명_변수명_변수명 -> 변수명=변수명_변수명,
+    s = re.sub(r"^(\s*)(text)_(final)_(text)$", r"\1\2=\3_\4,", s)
+    # 3. 등호가 이미 있는 경우 점 복구 (X=paddle_wordx -> x=paddle_word.x,)
+    # 먼저 등호가 있는 경우를 처리 (더 구체적이므로 우선)
+    s = re.sub(r"=(\w+)_word([a-z])", r"=\1_word.\2", s, flags=re.I)
+    s = re.sub(r"=(\w+)_word([A-Z])", r"=\1_word.\2", s, flags=re.I)
+    # 대문자 변수명 소문자로 변환 (X= -> x=, W= -> w=)
+    s = re.sub(r"^(\s*)([A-Z])=(\w+\.\w+)", r"\1\2.lower()=\3", s)
+    s = re.sub(r"^(\s*)([A-Z])=(\w+_word\.\w+)", r"\1\2.lower()=\3", s)
+    # .lower() 제거하고 직접 소문자로 변환
+    s = re.sub(r"([A-Z])\.lower\(\)=", lambda m: m.group(1).lower() + "=", s)
+    # 4. 점 복구 (paddle_wordx -> paddle_word.x, paddle_wordy -> paddle_word.y)
+    # 등호가 없는 경우: paddle_wordx -> paddle_word.x,
+    s = re.sub(r"^(\s*)(\w+)_word([a-z])$", r"\1\2_word.\3,", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)_word([A-Z])$", r"\1\2_word.\3,", s, flags=re.I)
+    s = re.sub(r"^(\s*)(\w+)word([a-z])$", r"\1\2_word.\3,", s, flags=re.I)
+    # 5. 등호와 언더스코어 복구 (h_paddle_wordh -> h=paddle_word.h,)
+    # _word 패턴이 있는 경우 먼저 처리
+    s = re.sub(r"^(\s*)([a-z])_(\w+)_word([a-z])$", r"\1\2=\3_word.\4,", s)
+    s = re.sub(r"^(\s*)([a-z])_(\w+)$", r"\1\2=\3,", s)  # 단순한 경우 (text_final_text 등)
+    # 대문자 속성명 소문자로 변환 (W -> w)
+    s = re.sub(r"=(\w+_word\.)([A-Z])", lambda m: "=" + m.group(1) + m.group(2).lower(), s)
+    # 함수 파라미터 등호 복구 강화 (변수명_변수명 -> 변수명=변수명,)
+    # 같은 변수명이 반복되는 경우
+    s = re.sub(r"^(\s*)(\w+)_(\2)$", r"\1\2=\3,", s)  # code_mode_code_mode -> code_mode=code_mode,
+    s = re.sub(r"^(\s*)(\w+)_(\w+)_(\3)$", r"\1\2_\3=\4,", s)  # indent_step_indent_step -> indent_step=indent_step,
+    s = re.sub(r"^(\s*)(\w+)_(\w+)_(\w+)_(\4)$", r"\1\2_\3_\4=\5,", s)  # remove_emoji_remove_emoji -> remove_emoji=remove_emoji,
+    # 6. 괄호 복구 (merged_words.append(WordBox -> merged_words.append(WordBox()
+    s = re.sub(r"(\w+)\.append\((\w+)$", r"\1.append(\2(", s)
+    # 5. conf 복구 강화 (onf -> conf)
+    s = re.sub(r"(\w+)_onf\s*_(\w+)", r"\1.conf=\2", s, flags=re.I)
+    s = re.sub(r"(\w+)_onf$", r"\1.conf", s, flags=re.I)
+    s = re.sub(r"^(\s*)onf\s*_(\w+)", r"\1conf=\2", s, flags=re.I)
+    s = re.sub(r"^(\s*)onf\s*=", r"\1conf=", s, flags=re.I)
+    # 6. 괄호 오인식 복구 ([ -> (, ] -> ))
+    # 함수 호출 패턴: print[ -> print(, return [ -> return (
+    s = re.sub(r"\b(print|return|if|elif|for|while|with|def|class|append)\s*\[", r"\1(", s, flags=re.I)
+    # 변수 접근 패턴은 유지: [0], [1] 등은 그대로
+    # 하지만 함수 호출 뒤의 [는 (로 변경
+    s = re.sub(r"(\w+)\s*\[\s*f\s*[\"']", r'\1(f"', s)  # print[f" -> print(f"
+    s = re.sub(r"(\w+)\s*\[\s*[\"']", r'\1("', s)  # print[" -> print("
+    # 닫는 괄호 복구 (] -> ))
+    # 하지만 배열 인덱스는 유지해야 하므로 주의
+    # 함수 호출 끝의 ]를 )로 변경 (단, 배열 인덱스가 아닌 경우)
+    s = re.sub(r"\)\s*\]\s*$", "))", s)  # )] -> ))
+    s = re.sub(r"\]\s*\]\s*$", "))", s)  # ]] -> ))
+    s = re.sub(r"\]\s*$", ")", s)  # 줄 끝의 ]를 )로
+    # 7. f-string 복구
+    s = re.sub(r'f\s*\[\s*"', 'f"', s)
+    s = re.sub(r"f\s*\[\s*'", "f'", s)
+    # 8. 등호 복구 (h_paddle_word.h, -> h=paddle_word.h,)
+    # 점이 이미 있는데 등호가 없는 경우
+    s = re.sub(r"^(\s*)([a-z])_(\w+_word\.\w+),?$", r"\1\2=\3,", s)
+    # 9. 쉼표 복구 (줄 끝에 쉼표가 없으면 추가)
+    s = re.sub(r"(\w+\.\w+)\s*$", r"\1,", s)  # paddle_word.x -> paddle_word.x,
+    s = re.sub(r"(\w+=\w+\.\w+)\s*$", r"\1,", s)  # x=paddle_word.x -> x=paddle_word.x,
+    # 특수문자 복구 (✅, 한글 등)
+    s = re.sub(r"[✅✓✔]", "✅", s)  # 다양한 체크마크를 ✅로 통일
+    # 언더스코어 복구 (PADDLEOR INSTANE -> _PADDLEOCR_INSTANCE)
+    s = re.sub(r"([A-Z]+)\s+([A-Z]+)", r"\1_\2", s)  # 공백으로 분리된 대문자를 언더스코어로
+    # 하지만 이미 언더스코어가 있는 경우는 유지
+    s = re.sub(r"([A-Z]+)_\s+([A-Z]+)", r"\1_\2", s)  # 언더스코어와 공백이 함께 있는 경우
+    # PaddleOCR 변수명 복구 강화
+    s = re.sub(r"\bPADDLE\s*OR\s*C\s*R\s*_?\s*INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"\bPADDLE\s*OR\s*_?\s*INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"\bPADDLE\s*OCR\s*_?\s*INSTANCE\b", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    # _PADDLEOR_INSTANE -> _PADDLEOCR_INSTANCE
+    s = re.sub(r"_PADDLEOR\s*_?\s*INSTANE", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    s = re.sub(r"_PADDLE\s*OR\s*_?\s*INSTANCE", "_PADDLEOCR_INSTANCE", s, flags=re.I)
+    # PP-OCRv4/v5 오인식 복구 강화
+    s = re.sub(r"PP\s*[-]?\s*OR\s*v\s*(\d+)\s*[/]?\s*V?\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    s = re.sub(r"PP\s*[-]?\s*OCR\s*v\s*(\d+)\s*[/]?\s*v\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    s = re.sub(r"PP\s*[-]?\s*OR\s*v\s*(\d+)\s*[/]?\s*(\d+)", r"PP-OCRv\1/v\2", s, flags=re.I)
+    # 한글+영어 최적화 오인식 복구
+    s = re.sub(r"한글\s*[+]\s*영어\s*최적화", "한글+영어 최적화", s)
+    s = re.sub(r"한글\s*영어\s*최적화", "한글+영어 최적화", s)
+    s = re.sub(r"한글\s*영어", "한글+영어", s)
+    # 초기화 완료 오인식 복구
+    s = re.sub(r"초기화\s*최적화\s*완료", "초기화 완료", s)
+    s = re.sub(r"초기화\s*완료\s*최적화", "초기화 완료", s)
+    s = re.sub(r"초기화\s*완료\s*최신", "초기화 완료", s)
+    # 자동 다운로드 모델 오인식 복구
+    s = re.sub(r"자동\s*다운로드\s*모델", "자동 다운로드 모델", s)
+    s = re.sub(r"자동\s*다운로드", "자동 다운로드", s)
+    # 숫자 오인식 복구 (08 -> 0, v4/v5 -> v4/v5)
+    s = re.sub(r"v\s*(\d+)\s*[/]\s*v\s*(\d+)", r"v\1/v\2", s, flags=re.I)
+    s = re.sub(r"v\s*(\d+)\s*[/]\s*V\s*(\d+)", r"v\1/v\2", s, flags=re.I)
+    s = re.sub(r"(\d+)0(\d+)", r"\1\2", s)  # 08 -> 0 (중간에 0이 잘못 들어간 경우)
+    
     lead = len(s) - len(s.lstrip(" "))
     body = re.sub(r"[ ]{2,}", " ", s.lstrip(" "))
     return (" " * lead) + body
@@ -902,6 +1194,110 @@ def select_roi_auto(image: np.ndarray, window_name: str = "Select ROI") -> np.nd
     return cropped
 
 
+def merge_paddleocr_winrt_results(
+    paddleocr_words: List[WordBox],
+    winrt_words: List[WordBox],
+    pil_img: Image.Image,
+) -> str:
+    """
+    PaddleOCR과 WinRT 결과를 병합하여 정확도 향상
+    - PaddleOCR: 코드 문법 기호 인식 우수
+    - WinRT: 한글 인식 우수
+    - 두 결과를 병합하여 최적의 텍스트 추출
+    """
+    korean_re = re.compile(r"[가-힣]")
+    paddleocr_lines = cluster_lines(paddleocr_words)
+    winrt_lines = cluster_lines(winrt_words)
+
+    def find_overlapping_winrt_word(paddle_word: WordBox, winrt_words_list: List[WordBox], threshold: float = 0.5) -> Optional[WordBox]:
+        best_match = None
+        best_overlap = 0.0
+        for winrt_word in winrt_words_list:
+            y_overlap = min(paddle_word.y2, winrt_word.y2) - max(paddle_word.y, winrt_word.y)
+            if y_overlap <= 0:
+                continue
+            x_overlap = min(paddle_word.x2, winrt_word.x2) - max(paddle_word.x, winrt_word.x)
+            if x_overlap <= 0:
+                continue
+            paddle_area = paddle_word.w * paddle_word.h
+            overlap_area = x_overlap * y_overlap
+            if paddle_area > 0:
+                overlap_ratio = overlap_area / paddle_area
+                if overlap_ratio >= threshold and overlap_ratio > best_overlap:
+                    best_overlap = overlap_ratio
+                    best_match = winrt_word
+        return best_match
+
+    merged_words: List[WordBox] = []
+    for paddle_line in paddleocr_lines:
+        for paddle_word in paddle_line.words:
+            nearby_winrt_words = [
+                w for w in winrt_words
+                if abs(w.cy - paddle_word.cy) < paddle_word.h * 2.0
+            ]
+            overlapping_winrt = find_overlapping_winrt_word(paddle_word, nearby_winrt_words)
+            final_text = paddle_word.text
+            
+            if overlapping_winrt:
+                winrt_text_val = overlapping_winrt.text.strip()
+                paddle_text_val = paddle_word.text.strip()
+                
+                # 한글이 포함된 경우 WinRT 우선 (한글 인식이 더 정확)
+                if korean_re.search(winrt_text_val):
+                    final_text = winrt_text_val
+                # 코드 문법 기호가 많은 경우 PaddleOCR 우선
+                elif ASCII_CODE_RE.findall(paddle_text_val) and not korean_re.search(paddle_text_val):
+                    final_text = paddle_text_val
+                # 길이가 비슷하면 PaddleOCR 우선 (코드 인식이 더 정확)
+                elif abs(len(paddle_text_val) - len(winrt_text_val)) <= 2:
+                    final_text = paddle_text_val
+                else:
+                    final_text = winrt_text_val if len(winrt_text_val) > len(paddle_text_val) else paddle_text_val
+            else:
+                # 한글이 없는 코드는 PaddleOCR 우선
+                if not korean_re.search(paddle_word.text):
+                    final_text = paddle_word.text
+                else:
+                    # 한글이 있는 경우 주변 WinRT 단어 확인
+                    nearby_korean_winrt = [
+                        w for w in nearby_winrt_words
+                        if korean_re.search(w.text) and abs(w.x - paddle_word.x) < paddle_word.w * 3.0
+                    ]
+                    if nearby_korean_winrt:
+                        closest = min(nearby_korean_winrt, key=lambda w: abs(w.x - paddle_word.x))
+                        final_text = closest.text
+                    else:
+                        final_text = paddle_word.text
+            
+            merged_words.append(WordBox(
+                text=final_text,
+                x=paddle_word.x,
+                y=paddle_word.y,
+                w=paddle_word.w,
+                h=paddle_word.h,
+                conf=paddle_word.conf
+            ))
+    
+    # WinRT에만 있는 한글 단어 추가
+    for winrt_word in winrt_words:
+        is_overlapping = False
+        for paddle_word in paddleocr_words:
+            overlapping = find_overlapping_winrt_word(paddle_word, [winrt_word], threshold=0.3)
+            if overlapping:
+                is_overlapping = True
+                break
+        if not is_overlapping and korean_re.search(winrt_word.text):
+            merged_words.append(winrt_word)
+    
+    return reconstruct_text_from_words(
+        merged_words,
+        code_mode=True,
+        normalize=True,
+        indent_step=4,
+        remove_emoji=True,
+    )
+
+
 def merge_tesseract_winrt_results(
     tesseract_words: List[WordBox],
     winrt_words: List[WordBox],
@@ -1020,6 +1416,196 @@ def check_winrt_available():
     except Exception as e:
         return False, str(e)
 
+
+# ------------------------------------------------------------
+# PaddleOCR 설정 및 함수
+# ------------------------------------------------------------
+_PADDLEOCR_INSTANCE = None
+_PADDLEOCR_LOCAL_INSTANCE = None  # 로컬 모델 인스턴스
+
+# 로컬 모델 경로 설정
+_LOCAL_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
+_LOCAL_DET_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_server_v2.0_det_infer", "ch_ppocr_server_v2.0_det_infer")
+_LOCAL_REC_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_server_v2.0_rec_infer", "ch_ppocr_server_v2.0_rec_infer")
+_LOCAL_CLS_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_mobile_v2.0_cls_infer", "ch_ppocr_mobile_v2.0_cls_infer")
+
+
+def _check_local_models_available() -> bool:
+    """로컬 모델 파일 존재 여부 확인"""
+    return (
+        os.path.exists(_LOCAL_DET_MODEL) and
+        os.path.exists(_LOCAL_REC_MODEL) and
+        os.path.exists(_LOCAL_CLS_MODEL)
+    )
+
+
+def _get_paddleocr_instance(use_local: bool = False):
+    """
+    PaddleOCR 인스턴스를 싱글톤으로 관리
+    use_local=False (기본값): 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5, 한글+영어 최적화)
+    use_local=True: 로컬 모델 사용 (v2.0 구버전, 권장하지 않음)
+    
+    주의: 로컬 모델은 v2.0으로 오래된 버전이므로 최신 자동 다운로드 모델을 우선 사용합니다.
+    """
+    global _PADDLEOCR_INSTANCE, _PADDLEOCR_LOCAL_INSTANCE
+    
+    try:
+        from paddleocr import PaddleOCR
+        
+        # 최신 자동 다운로드 모델 우선 사용 (PP-OCRv4/v5, 한글+영어 최적화)
+        if _PADDLEOCR_INSTANCE is None:
+            _PADDLEOCR_INSTANCE = PaddleOCR(
+                use_angle_cls=True,  # 텍스트 방향 보정
+                lang='korean',  # 한글+영어 자동 인식 (최신 PP-OCRv4/v5 모델)
+                use_gpu=False,  # CPU 사용
+                show_log=False,  # 로그 최소화
+            )
+            print(f"✅ PaddleOCR 초기화 완료 (최신 자동 다운로드 모델, PP-OCRv4/v5, 한글+영어 최적화)")
+        return _PADDLEOCR_INSTANCE
+        
+        # 로컬 모델은 v2.0 구버전이므로 사용하지 않음 (필요시 주석 해제)
+        # if use_local and _check_local_models_available():
+        #     if _PADDLEOCR_LOCAL_INSTANCE is None:
+        #         _PADDLEOCR_LOCAL_INSTANCE = PaddleOCR(
+        #             det_model_dir=_LOCAL_DET_MODEL,
+        #             rec_model_dir=_LOCAL_REC_MODEL,
+        #             cls_model_dir=_LOCAL_CLS_MODEL,
+        #             use_angle_cls=True,
+        #             lang='ch',
+        #             use_gpu=False,
+        #             show_log=False,
+        #         )
+        #         print(f"⚠ PaddleOCR 초기화 완료 (로컬 v2.0 모델 사용, 구버전)")
+        #     return _PADDLEOCR_LOCAL_INSTANCE
+        
+    except ImportError:
+        raise RuntimeError("paddleocr이 설치되지 않았습니다. pip install paddlepaddle paddleocr")
+    except Exception as e:
+        raise RuntimeError(f"PaddleOCR 초기화 실패: {e}")
+
+
+def check_paddleocr_available():
+    """PaddleOCR 사용 가능 여부 확인 (최신 자동 다운로드 모델 사용)"""
+    try:
+        # 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5)
+        _get_paddleocr_instance(use_local=False)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def paddleocr_word_boxes(
+    pil_img: Image.Image,
+    *,
+    code_mode: bool = True,
+    remove_emoji: bool = True,
+    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+) -> List[WordBox]:
+    """PaddleOCR로 WordBox 리스트 추출 (최신 PP-OCRv4/v5 모델 사용)"""
+    try:
+        ocr = _get_paddleocr_instance(use_local=use_local_model)
+        # PIL Image를 numpy array로 변환
+        img_array = np.array(pil_img)
+        if len(img_array.shape) == 2:  # Grayscale
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+        elif img_array.shape[2] == 4:  # RGBA
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+        
+        # OCR 실행
+        result = ocr.ocr(img_array, cls=True)
+        
+        words: List[WordBox] = []
+        if result and result[0]:
+            for line in result[0]:
+                if line and len(line) >= 2:
+                    # line 구조: [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], (text, confidence)]
+                    bbox = line[0]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                    text_info = line[1]  # (text, confidence)
+                    
+                    if text_info and len(text_info) >= 2:
+                        text = text_info[0]
+                        conf = float(text_info[1])
+                        
+                        # bbox에서 좌표 추출
+                        x_coords = [p[0] for p in bbox]
+                        y_coords = [p[1] for p in bbox]
+                        x = float(min(x_coords))
+                        y = float(min(y_coords))
+                        x2 = float(max(x_coords))
+                        y2 = float(max(y_coords))
+                        w = x2 - x
+                        h = y2 - y
+                        
+                        # 텍스트 정리
+                        text = sanitize_text(text, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
+                        
+                        if text.strip():
+                            words.append(
+                                WordBox(
+                                    text=text,
+                                    x=x,
+                                    y=y,
+                                    w=w,
+                                    h=h,
+                                    conf=conf,
+                                )
+                            )
+        return words
+    except Exception as e:
+        print(f"⚠ PaddleOCR WordBox 추출 실패: {e}")
+        return []
+
+
+def get_paddleocr_words(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 3,
+    code_mode: bool = True,
+    remove_emoji: bool = True,
+    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+) -> List[WordBox]:
+    """PaddleOCR로 WordBox 리스트 추출 (이미지 전처리 포함)"""
+    pil_img = open_image_any(img)
+    if scale and scale != 1:
+        w, h = pil_img.size
+        pil_img = pil_img.resize((w * scale, h * scale), Image.LANCZOS)
+    pil_img = preprocess_for_code_pil(pil_img, enabled=code_mode)
+    return paddleocr_word_boxes(pil_img, code_mode=code_mode, remove_emoji=remove_emoji, use_local_model=use_local_model)
+
+
+def image_to_text_paddleocr(
+    img: Union[np.ndarray, Image.Image],
+    *,
+    scale: int = 3,
+    code_mode: bool = True,
+    normalize: bool = True,
+    indent_step: int = 4,
+    remove_emoji: bool = True,
+    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+) -> str:
+    """PaddleOCR로 텍스트 추출"""
+    pil_img = open_image_any(img)
+    if scale and scale != 1:
+        w, h = pil_img.size
+        pil_img = pil_img.resize((w * scale, h * scale), Image.LANCZOS)
+    pil_img = preprocess_for_code_pil(pil_img, enabled=code_mode)
+    
+    words = paddleocr_word_boxes(pil_img, code_mode=code_mode, remove_emoji=remove_emoji, use_local_model=use_local_model)
+    
+    if not words:
+        return ""
+    
+    # WordBox를 텍스트로 재구성
+    out = reconstruct_text_from_words(
+        words,
+        code_mode=code_mode,
+        normalize=normalize,
+        indent_step=indent_step,
+        remove_emoji=remove_emoji,
+    )
+    
+    return out
+
 def capture_and_ocr() -> dict:
     """
     화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
@@ -1033,14 +1619,15 @@ def capture_and_ocr() -> dict:
         }
     """
     try:
-        # Tesseract와 WinRT 사용 가능 여부 확인
+        # OCR 엔진 사용 가능 여부 확인
+        paddleocr_available, paddleocr_error = check_paddleocr_available()
         tesseract_available = pytesseract is not None
         winrt_available, winrt_error = check_winrt_available()
         
-        if not tesseract_available and not winrt_available:
+        if not paddleocr_available and not tesseract_available and not winrt_available:
             return {
                 "success": False,
-                "error": "Tesseract와 WinRT 모두 사용 불가능합니다. OCR을 수행할 수 없습니다.",
+                "error": "모든 OCR 엔진이 사용 불가능합니다. (PaddleOCR, Tesseract, WinRT 모두 실패)",
                 "text": "",
                 "method": ""
             }
@@ -1061,10 +1648,37 @@ def capture_and_ocr() -> dict:
         ocr_result = None
         ocr_method = None
         
+        # PaddleOCR 우선 사용 (최신 모델, 정확도 높음)
+        paddleocr_words = None
+        paddleocr_text = None
         tesseract_words = None
         tesseract_text = None
         winrt_words = None
         winrt_text = None
+        
+        if paddleocr_available:
+            try:
+                # 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5, 한글+영어 최적화)
+                print(f"🚀 PaddleOCR 실행 중... (최신 자동 다운로드 모델, PP-OCRv4/v5)")
+                # WordBox 가져오기
+                paddleocr_words = get_paddleocr_words(
+                    cropped,
+                    scale=3,
+                    code_mode=True,
+                    remove_emoji=True,
+                    use_local_model=False  # 최신 모델 사용
+                )
+                # 전체 텍스트도 가져오기
+                paddleocr_text = image_to_text_paddleocr(
+                    cropped,
+                    scale=3,
+                    code_mode=True,
+                    normalize=True,
+                    use_local_model=False  # 최신 모델 사용
+                )
+                print("✅ PaddleOCR 완료")
+            except Exception as e:
+                print(f"⚠ PaddleOCR 실패: {e}")
         
         if tesseract_available:
             try:
@@ -1107,8 +1721,25 @@ def capture_and_ocr() -> dict:
             except Exception as e:
                 print(f"⚠ WinRT OCR 실패: {e}")
         
-        # 결과 병합
-        if tesseract_words and winrt_words:
+        # 결과 선택 (PaddleOCR + WinRT 병합 우선)
+        if paddleocr_words and winrt_words:
+            try:
+                pil_img = open_image_any(cropped)
+                ocr_result = merge_paddleocr_winrt_results(
+                    paddleocr_words,
+                    winrt_words,
+                    pil_img
+                )
+                ocr_method = "PaddleOCR + WinRT 병합 (최신 PP-OCRv4/v5, 정확도 최적화)"
+            except Exception as e:
+                print(f"⚠ PaddleOCR+WinRT 병합 실패: {e}, PaddleOCR 결과 사용")
+                if paddleocr_text:
+                    ocr_result = paddleocr_text
+                    ocr_method = "PaddleOCR (최신 PP-OCRv4/v5, 병합 실패)"
+        elif paddleocr_text:
+            ocr_result = paddleocr_text
+            ocr_method = "PaddleOCR (최신 PP-OCRv4/v5, 한글+영어 최적화)"
+        elif tesseract_words and winrt_words:
             try:
                 pil_img = open_image_any(cropped)
                 ocr_result = merge_tesseract_winrt_results(

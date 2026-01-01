@@ -16,7 +16,7 @@ from core.analyzer import (
     INPUT_FILE,
     OUTPUT_JSON,
 )
-from core.capture import capture_and_ocr
+from core.capture import capture_and_ocr, check_paddleocr_available
 
 app = FastAPI(title="TaskFlow Analyzer", version="1.0.0")
 
@@ -40,8 +40,18 @@ OUTPUTS_DIR.mkdir(exist_ok=True)
 
 @app.on_event("startup")
 def startup():
-    # 모델은 서버 시작 시 1회 로딩
+    # LLM 모델은 서버 시작 시 1회 로딩
     load_model_once()
+    
+    # PaddleOCR 초기화 (서버 시작 시 미리 로딩 - 최신 모델 사용)
+    try:
+        paddleocr_available, error = check_paddleocr_available()
+        if paddleocr_available:
+            print(f"✅ PaddleOCR 준비 완료 (최신 자동 다운로드 모델, PP-OCRv4/v5, 한글+영어 최적화)")
+        else:
+            print(f"⚠ PaddleOCR 사용 불가: {error}")
+    except Exception as e:
+        print(f"⚠ PaddleOCR 초기화 경고: {e}")
 
 
 @app.get("/health")

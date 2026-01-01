@@ -428,18 +428,31 @@ def load_model_once():
 
     print(f"🔄 모델 로딩 중... ({MODEL_ID})")
     _TOKENIZER = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-    _MODEL = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        trust_remote_code=True,
-    )
+    
+    # GPU 사용 시 명시적으로 cuda:0 지정 (device_map="auto"는 CPU에 일부 레이어 배치할 수 있음)
+    if torch.cuda.is_available():
+        _MODEL = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            device_map="cuda:0",  # 명시적으로 GPU 0에 배치
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+        )
+        device = "cuda:0"
+    else:
+        _MODEL = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32,
+            trust_remote_code=True,
+        )
+        device = "cpu"
+    
     if _TOKENIZER.pad_token is None:
         _TOKENIZER.pad_token = _TOKENIZER.eos_token
     _MODEL.eval()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"✅ 모델 로딩 완료! (device={device})")
+    # 실제 모델이 있는 디바이스 확인
+    actual_device = next(_MODEL.parameters()).device
+    print(f"✅ 모델 로딩 완료! (device={device}, actual_device={actual_device})")
     return _TOKENIZER, _MODEL
 
 
@@ -597,7 +610,9 @@ def _extract_json(text: str) -> str:
 
 def _generate_once(tokenizer, model, messages: List[Dict[str, str]], cfg: AnalyzerConfig) -> str:
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    model_inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
+    # device_map을 사용할 때는 model.device가 제대로 작동하지 않을 수 있으므로 명시적으로 확인
+    device = next(model.parameters()).device if hasattr(model, 'parameters') and next(model.parameters(), None) is not None else (torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"))
+    model_inputs = tokenizer([prompt], return_tensors="pt").to(device)
 
     with torch.inference_mode():
         out = model.generate(

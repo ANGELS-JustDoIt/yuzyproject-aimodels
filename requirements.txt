@@ -89,3 +89,5 @@ wcwidth==0.2.14
 fastapi==0.123.9
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
+paddlepaddle==3.2.0
+paddleocr>=2.9.0
