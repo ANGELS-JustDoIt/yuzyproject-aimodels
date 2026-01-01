@@ -54,6 +54,12 @@ outputs/
 # PaddleOCR training outputs and checkpoints
 PaddleOCR/output/
 PaddleOCR/.paddlers/
+PaddleOCR/**/best_model/
+PaddleOCR/**/latest.*
+PaddleOCR/**/*.pdparams
+PaddleOCR/**/*.pdopt
+PaddleOCR/**/*.states
+PaddleOCR/**/inference/
 **/*.pdparams
 **/*.pdopt
 **/*.states
@@ -76,6 +82,28 @@ data/
 OCR_Data/
 PaddleData/
 S:/OCR_Data/
+
+# PaddleOCR output and checkpoints
+PaddleOCR/output/
+PaddleOCR/.paddlers/
+PaddleOCR/**/best_model/
+PaddleOCR/**/latest.*
+PaddleOCR/**/*.pdparams
+PaddleOCR/**/*.pdopt
+PaddleOCR/**/*.states
+PaddleOCR/**/inference/
+
+# Model files
+*.pdparams
+*.pdopt
+*.states
+**/best_model/
+**/latest.*
+**/inference/
+
+# Server model files
+yuzyproject-aimodels/server/
+output_root/
 
 # Environment variables
 .env
