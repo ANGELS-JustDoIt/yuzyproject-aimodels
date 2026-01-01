@@ -1,15 +1,144 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
 venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+venv_ocr/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+yuzyproject-backend/
+yuzyproject-frontend/
+
+# OCR and Analysis outputs
+yuzyproject-aimodels/aimodels/
+yuzyproject-aimodels/outputs/
+outputs/
+
+# PaddleOCR training outputs and checkpoints
+PaddleOCR/output/
+PaddleOCR/.paddlers/
+PaddleOCR/**/best_model/
+PaddleOCR/**/latest.*
+PaddleOCR/**/*.pdparams
+PaddleOCR/**/*.pdopt
+PaddleOCR/**/*.states
+PaddleOCR/**/inference/
+**/*.pdparams
+**/*.pdopt
+**/*.states
+**/best_model/
+**/latest.*
+**/inference/
+
+# 예외: 특정 모델 파일은 커밋 (필요한 경우)
+# !output/det_ke_model/best_accuracy.pdparams
+
+# Temporary analysis files
+**/aimodels/**/*_raw_output.txt
+**/aimodels/**/*_extracted_json.json
+**/aimodels/**/*_parsed_json.json
+**/aimodels/**/*_json_error.txt
+
+# Dataset files (too large for git)
+yuzyproject-aimodels/code_syntax_dataset/
+data/
+OCR_Data/
+PaddleData/
+S:/OCR_Data/
+
+# PaddleOCR output and checkpoints
+PaddleOCR/output/
+PaddleOCR/.paddlers/
+PaddleOCR/**/best_model/
+PaddleOCR/**/latest.*
+PaddleOCR/**/*.pdparams
+PaddleOCR/**/*.pdopt
+PaddleOCR/**/*.states
+PaddleOCR/**/inference/
+
+# Model files
+*.pdparams
+*.pdopt
+*.states
+**/best_model/
+**/latest.*
+**/inference/
+
+# Server model files
+yuzyproject-aimodels/server/
+output_root/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db
+.DS_Store
+*.tmp
+*.bak
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
 test.ipynb
-.gitignore
 project_full_context.txt
+project_full_context_2.txt
 .png
 rendered_code_cards/
 server/
-project_full_context_2.txt
-ㄱㄷ
 test/
 debug_outputs/
-outputs/
-
-aimodels/
-__pycache__
