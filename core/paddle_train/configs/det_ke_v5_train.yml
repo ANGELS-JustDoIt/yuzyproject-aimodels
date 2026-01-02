@@ -1,0 +1,172 @@
+Global:
+  debug: false
+  use_gpu: true
+  epoch_num: 15
+  log_smooth_window: 20
+  print_batch_step: 10
+  save_model_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\ppocr_v5_training_20260102_023212\det_model
+  save_epoch_step: 5
+  eval_batch_step: 200
+  cal_metric_during_train: true
+  pretrained_model: null
+  checkpoints: null
+  use_visualdl: false
+  infer_img: doc/imgs_en/img_10.jpg
+  save_inference_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\ppocr_v5_training_20260102_023212\det_inference
+  use_pdserving: false
+
+Architecture:
+  model_type: det
+  algorithm: DB
+  Transform: null
+  Backbone:
+    name: PPLCNetV3
+    scale: 0.95
+    det: true
+  Neck:
+    name: RSEFPN
+    out_channels: 96
+  Head:
+    name: DBHead
+    k: 50
+
+Loss:
+  name: DBLoss
+  balance_loss: true
+  main_loss_type: DiceLoss
+  alpha: 5
+  beta: 10
+  ohem_ratio: 3
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Cosine
+    learning_rate: 0.001
+    warmup_epoch: 1
+  regularizer:
+    name: L2
+    factor: 0.00001
+
+PostProcess:
+  name: DBPostProcess
+  thresh: 0.3
+  box_thresh: 0.6
+  max_candidates: 1000
+  unclip_ratio: 1.5
+  use_dilation: false
+
+Metric:
+  name: DetMetric
+  main_indicator: hmean
+
+Train:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\det
+    label_file_list:
+    - C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\det\train_label.txt
+    ratio_list:
+    - 1.0
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - DetLabelEncode: null
+    - IaaAugment:
+        augmenter_args:
+        - type: Fliplr
+          args:
+            p: 0.5
+        - type: Affine
+          args:
+            rotate:
+            - -10
+            - 10
+        - type: Resize
+          args:
+            size:
+            - 0.5
+            - 3
+    - EastRandomCropData:
+        size:
+        - 640
+        - 640
+        max_tries: 50
+        keep_ratio: false
+    - MakeBorderMap:
+        shrink_ratio: 0.4
+        thresh_min: 0.3
+        thresh_max: 0.7
+    - MakeShrinkMap:
+        shrink_ratio: 0.4
+        min_text_size: 8
+    - NormalizeImage:
+        scale: 1.0/255.0
+        mean:
+        - 0.485
+        - 0.456
+        - 0.406
+        std:
+        - 0.229
+        - 0.224
+        - 0.225
+        order: hwc
+    - ToCHWImage: null
+    - KeepKeys:
+        keep_keys:
+        - image
+        - threshold_map
+        - threshold_mask
+        - shrink_map
+        - shrink_mask
+  loader:
+    shuffle: true
+    batch_size_per_card: 12
+    drop_last: true
+    num_workers: 2
+    pin_memory: true
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\det
+    label_file_list:
+    - C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\det\test_label.txt
+    ratio_list:
+    - 1.0
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - DetLabelEncode: null
+    - DetResizeForTest:
+        image_shape:
+        - 736
+        - 1280
+    - NormalizeImage:
+        scale: 1.0/255.0
+        mean:
+        - 0.485
+        - 0.456
+        - 0.406
+        std:
+        - 0.229
+        - 0.224
+        - 0.225
+        order: hwc
+    - ToCHWImage: null
+    - KeepKeys:
+        keep_keys:
+        - image
+        - shape
+        - polys
+        - ignore_tags
+  loader:
+    shuffle: false
+    batch_size_per_card: 1
+    drop_last: false
+    num_workers: 1
+    pin_memory: true

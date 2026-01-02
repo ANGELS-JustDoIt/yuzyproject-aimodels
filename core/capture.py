@@ -12,6 +12,7 @@ import cv2
 from PIL import Image, ImageEnhance, ImageFilter
 from mss import mss
 import pyperclip
+import yaml
 
 # ------------------------------------------------------------
 # OCR 유틸 (기존 ocr_utils.py 내용을 이 파일로 통합)
@@ -83,19 +84,28 @@ def sanitize_text(
 
 
 def preprocess_for_code_pil(img: Image.Image, enabled: bool) -> Image.Image:
+    """
+    코드 이미지 전처리 (대비, 선명도 향상)
+    주의: 너무 강한 전처리는 텍스트를 손상시킬 수 있으므로 주의
+    """
     if not enabled:
         return img
-    g = img.convert("L")
-    g = ImageEnhance.Contrast(g).enhance(2.8)
-    g = ImageEnhance.Sharpness(g).enhance(2.2)
-    g = ImageEnhance.Brightness(g).enhance(1.1)
-    g = g.filter(ImageFilter.MedianFilter(size=3))
-    arr = np.array(g)
-    _, binary = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    kernel = np.ones((1, 1), np.uint8)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    g = Image.fromarray(binary)
-    return g.convert("RGB")
+    try:
+        g = img.convert("L")
+        g = ImageEnhance.Contrast(g).enhance(2.8)
+        g = ImageEnhance.Sharpness(g).enhance(2.2)
+        g = ImageEnhance.Brightness(g).enhance(1.1)
+        g = g.filter(ImageFilter.MedianFilter(size=3))
+        arr = np.array(g)
+        _, binary = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = np.ones((1, 1), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        g = Image.fromarray(binary)
+        return g.convert("RGB")
+    except Exception as e:
+        # 전처리 실패 시 원본 이미지 반환
+        print(f"   ⚠ 이미지 전처리 실패, 원본 사용: {e}")
+        return img.convert("RGB")
 
 
 def open_image_any(img: Union[np.ndarray, Image.Image]) -> Image.Image:
@@ -153,7 +163,8 @@ def cluster_lines(words: List[WordBox]) -> List[LineBox]:
         return []
     heights = [w.h for w in words if w.h > 0]
     med_h = _robust_median(heights, default=14.0)
-    y_thresh = max(6.0, med_h * 0.60)
+    # y_thresh를 더 타이트하게 설정하여 줄 압착 방지 (0.60 -> 0.30)
+    y_thresh = max(4.0, med_h * 0.30)
     ws = sorted(words, key=lambda w: (w.cy, w.x))
     lines: List[LineBox] = []
     cur: List[WordBox] = []
@@ -188,7 +199,8 @@ def cluster_lines(words: List[WordBox]) -> List[LineBox]:
             continue
         prev = merged[-1]
         gap = ln.y_top - prev.y_bot
-        if gap <= max(2.0, med_h * 0.15):
+        # 줄 병합 임계값을 더 타이트하게 설정 (0.15 -> 0.10)
+        if gap <= max(1.0, med_h * 0.10):
             merged_words = sorted(prev.words + ln.words, key=lambda t: t.x)
             y_top = min(t.y for t in merged_words)
             y_bot = max(t.y2 for t in merged_words)
@@ -209,13 +221,17 @@ def estimate_char_width(lines: List[LineBox]) -> float:
             if " " in txt:
                 continue
             cw = w.w / max(1, len(txt))
-            if 2.0 <= cw <= 80.0:
+            # 리사이즈된 이미지(x3)에서 너무 크게 계산되지 않도록 제한 (80.0 -> 30.0)
+            if 2.0 <= cw <= 30.0:
                 samples.append(float(cw))
     if not samples:
         heights = [w.h for ln in lines for w in ln.words if w.h > 0]
         med_h = _robust_median(heights, default=14.0)
-        return max(6.0, med_h * 0.55)
-    return _robust_median(samples, default=8.0)
+        # 리사이즈된 이미지 고려하여 더 작은 값 반환 (0.55 -> 0.40)
+        return max(4.0, med_h * 0.40)
+    char_w = _robust_median(samples, default=8.0)
+    # 최대값 제한 (리사이즈된 이미지 대응)
+    return min(char_w, 30.0)
 
 
 ASCII_CODE_RE = re.compile(r"[A-Za-z0-9_{}\[\]().,:;=<>!+\-/*%\\'\"`@#$^|~]")
@@ -774,11 +790,17 @@ def reconstruct_text_from_words(
             if not txt:
                 continue
             gap_px = w.x - prev_x2
-            if gap_px <= char_w * 0.10:
+            # 공백 보존 로직 개선: gap_px가 조금이라도 있으면 최소 1칸 공백 삽입
+            if gap_px <= 0:
+                # 겹치는 경우 공백 없음
+                spaces = 0
+            elif gap_px <= char_w * 0.02:
+                # 매우 작은 간격 (2% 이하)은 공백 없음 (인식 오차 범위)
                 spaces = 0
             else:
+                # gap_px가 있으면 반드시 최소 1칸 공백 삽입
                 spaces = int(round(gap_px / max(1e-6, char_w)))
-                spaces = clamp_int(spaces, 1, 80)
+                spaces = clamp_int(spaces, 1, 80)  # 최소 1개, 최대 80개
             parts.append(" " * spaces)
             parts.append(txt)
             prev_x2 = max(prev_x2, w.x2)
@@ -1422,12 +1444,222 @@ def check_winrt_available():
 # ------------------------------------------------------------
 _PADDLEOCR_INSTANCE = None
 _PADDLEOCR_LOCAL_INSTANCE = None  # 로컬 모델 인스턴스
+_PADDLEOCR_TRAINED_INSTANCE = None  # v5 학습된 모델 인스턴스
 
 # 로컬 모델 경로 설정
 _LOCAL_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 _LOCAL_DET_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_server_v2.0_det_infer", "ch_ppocr_server_v2.0_det_infer")
 _LOCAL_REC_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_server_v2.0_rec_infer", "ch_ppocr_server_v2.0_rec_infer")
 _LOCAL_CLS_MODEL = os.path.join(_LOCAL_MODELS_DIR, "ch_ppocr_mobile_v2.0_cls_infer", "ch_ppocr_mobile_v2.0_cls_infer")
+
+# v5 학습된 모델 경로 설정 (v5 전용)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+# v5 학습된 Recognition 모델 (rec_ke_v5_inference)
+_TRAINED_REC_MODEL_DIR = os.path.join(_PROJECT_ROOT, "output", "rec_ke_v5_inference")
+_TRAINED_REC_MODEL_PATH = os.path.join(_TRAINED_REC_MODEL_DIR, "inference")
+_TRAINED_REC_INFERENCE_YML = os.path.join(_TRAINED_REC_MODEL_DIR, "inference.yml")
+# v5 Detection 모델 (det_ke_inference - PP-OCRv5_server_det)
+_TRAINED_DET_MODEL_DIR = os.path.join(_PROJECT_ROOT, "output", "det_ke_inference")
+_TRAINED_DET_MODEL_PATH = os.path.join(_TRAINED_DET_MODEL_DIR, "inference")
+_TRAINED_DET_INFERENCE_YML = os.path.join(_TRAINED_DET_MODEL_DIR, "inference.yml")
+
+
+def _fix_inference_yml(yml_path: str, model_name: str, model_type: str = "rec") -> bool:
+    """
+    inference.yml 파일에 Global 섹션과 model_name을 자동으로 추가/수정
+    
+    Args:
+        yml_path: inference.yml 파일 경로
+        model_name: 모델 이름 (예: "PP-OCRv5_server_rec", "PP-OCRv5_server_det")
+        model_type: 모델 타입 ("rec" 또는 "det")
+    
+    Returns:
+        bool: 수정 성공 여부
+    """
+    if not os.path.exists(yml_path):
+        print(f"[WARN] inference.yml 파일이 없습니다: {yml_path}")
+        return False
+    
+    try:
+        # YAML 파일 읽기
+        with open(yml_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            content = ''.join(lines)
+            # YAML 파싱
+            try:
+                config = yaml.safe_load(content) or {}
+            except Exception:
+                # YAML 파싱 실패 시 빈 딕셔너리로 시작
+                config = {}
+        
+        # Global 섹션이 없으면 생성
+        if 'Global' not in config:
+            config['Global'] = {}
+        
+        # model_name 처리: PaddleX의 엄격한 검증을 피하기 위해 model_name을 삭제하거나 업데이트
+        needs_update = False
+        # Recognition 모델의 경우 model_name을 삭제하여 PaddleX가 자동으로 감지하도록 함
+        if model_type == "rec" and 'model_name' in config.get('Global', {}):
+            # 기존 model_name 삭제 (PaddleX가 자동으로 올바른 이름을 사용하도록)
+            if config['Global']['model_name'] != model_name:
+                # 다를 때만 삭제하고 업데이트하지 않음
+                del config['Global']['model_name']
+                needs_update = True
+        elif model_type == "det":
+            # Detection 모델은 model_name 유지
+            if 'model_name' not in config['Global'] or config['Global']['model_name'] != model_name:
+                config['Global']['model_name'] = model_name
+                needs_update = True
+        
+        # model_type 설정
+        if 'model_type' not in config['Global']:
+            config['Global']['model_type'] = model_type
+            needs_update = True
+        
+        # algorithm 설정 (Recognition 모델의 경우)
+        if model_type == "rec" and 'algorithm' not in config['Global']:
+            config['Global']['algorithm'] = "NRTR"
+            needs_update = True
+        
+        # Detection 모델의 경우
+        if model_type == "det":
+            if 'det_algorithm' not in config['Global']:
+                config['Global']['det_algorithm'] = "DB"
+                needs_update = True
+            if 'algorithm' not in config['Global']:
+                config['Global']['algorithm'] = "DB"
+                needs_update = True
+        
+        # use_gpu 설정 (기본값 False)
+        if 'use_gpu' not in config['Global']:
+            config['Global']['use_gpu'] = False
+            needs_update = True
+        
+        # use_pdserving 설정
+        if 'use_pdserving' not in config['Global']:
+            config['Global']['use_pdserving'] = False
+            needs_update = True
+        
+        # 업데이트가 필요한 경우에만 파일 쓰기
+        if needs_update:
+            # 기존 파일 백업
+            backup_path = yml_path + '.backup'
+            try:
+                import shutil
+                shutil.copy2(yml_path, backup_path)
+            except Exception:
+                pass
+            
+            # YAML 파일 쓰기
+            with open(yml_path, 'w', encoding='utf-8') as f:
+                # Global 섹션을 맨 위에 배치
+                yaml.dump({'Global': config['Global']}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                f.write('\n')
+                
+                # 나머지 섹션들 쓰기 (Global 제외)
+                for key, value in config.items():
+                    if key != 'Global':
+                        yaml.dump({key: value}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                        f.write('\n')
+            
+            # model_name이 정확히 업데이트되었는지 검증
+            with open(yml_path, 'r', encoding='utf-8') as f:
+                verify_config = yaml.safe_load(f) or {}
+                actual_model_name = verify_config.get('Global', {}).get('model_name', '')
+                if actual_model_name != model_name:
+                    print(f"[WARN] model_name 검증 실패: 예상={model_name}, 실제={actual_model_name}")
+                    # 강제로 다시 설정
+                    verify_config.setdefault('Global', {})['model_name'] = model_name
+                    with open(yml_path, 'w', encoding='utf-8') as f2:
+                        yaml.dump({'Global': verify_config['Global']}, f2, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                        f2.write('\n')
+                        for key, value in verify_config.items():
+                            if key != 'Global':
+                                yaml.dump({key: value}, f2, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                                f2.write('\n')
+                    print(f"[OK] model_name 강제 업데이트 완료: {model_name}")
+            
+            print(f"[OK] inference.yml 파일 수정 완료: {yml_path}")
+            print(f"   model_name: {model_name}, model_type: {model_type}")
+            return True
+        else:
+            print(f"[OK] inference.yml 파일 검증 완료 (수정 불필요): {yml_path}")
+            return True
+        
+    except Exception as e:
+        print(f"[WARN] inference.yml 파일 수정 실패: {yml_path}, 오류: {e}")
+        import traceback
+        print(f"   상세 오류: {traceback.format_exc()}")
+        return False
+
+
+def _extract_character_dict_from_yml(yml_path: str) -> Optional[str]:
+    """
+    inference.yml에서 character_dict를 추출하여 텍스트 파일로 저장
+    PaddleOCR이 사용할 수 있는 사전 파일 생성
+    """
+    if not os.path.exists(yml_path):
+        return None
+    
+    try:
+        with open(yml_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        
+        # PostProcess.character_dict 추출
+        postprocess = config.get('PostProcess', {})
+        character_dict = postprocess.get('character_dict', [])
+        
+        if not character_dict or not isinstance(character_dict, list):
+            return None
+        
+        # 사전 파일 경로 생성 (inference.yml과 같은 디렉토리)
+        dict_dir = os.path.dirname(yml_path)
+        dict_path = os.path.join(dict_dir, "character_dict.txt")
+        
+        # 사전 파일 생성 (한 줄에 한 문자)
+        with open(dict_path, 'w', encoding='utf-8') as dict_file:
+            for char in character_dict:
+                if char:  # None이나 빈 문자열 제외
+                    dict_file.write(str(char) + '\n')
+        
+        print(f"[OK] character_dict.txt 생성 완료: {dict_path} ({len(character_dict)}개 문자)")
+        return dict_path
+        
+    except Exception as e:
+        print(f"[WARN] character_dict 추출 실패: {yml_path}, 오류: {e}")
+        return None
+
+
+def _ensure_trained_model_configs() -> bool:
+    """
+    v5 학습된 모델의 inference.yml 파일들을 자동으로 보정
+    PaddleOCR 3.x에서 필수인 Global.model_name을 추가
+    그리고 character_dict를 사전 파일로 추출
+    """
+    success = True
+    
+    # Recognition 모델 설정 파일 보정
+    if os.path.exists(_TRAINED_REC_INFERENCE_YML):
+        if not _fix_inference_yml(_TRAINED_REC_INFERENCE_YML, "PP-OCRv5_server_rec", "rec"):
+            success = False
+        
+        # character_dict를 사전 파일로 추출 (dictionary mismatch 방지)
+        char_dict_path = _extract_character_dict_from_yml(_TRAINED_REC_INFERENCE_YML)
+        if char_dict_path:
+            print(f"[OK] Recognition 모델 사전 파일 준비 완료: {char_dict_path}")
+        else:
+            print(f"[WARN] Recognition 모델 사전 파일 생성 실패 (외계어 발생 가능)")
+    else:
+        print(f"[WARN] Recognition 모델 inference.yml 파일이 없습니다: {_TRAINED_REC_INFERENCE_YML}")
+    
+    # Detection 모델 설정 파일 보정
+    if os.path.exists(_TRAINED_DET_INFERENCE_YML):
+        if not _fix_inference_yml(_TRAINED_DET_INFERENCE_YML, "PP-OCRv5_server_det", "det"):
+            success = False
+    else:
+        print(f"[WARN] Detection 모델 inference.yml 파일이 없습니다: {_TRAINED_DET_INFERENCE_YML}")
+    
+    return success
 
 
 def _check_local_models_available() -> bool:
@@ -1439,28 +1671,150 @@ def _check_local_models_available() -> bool:
     )
 
 
-def _get_paddleocr_instance(use_local: bool = False):
+def _check_trained_model_available() -> bool:
+    """v5 학습된 Recognition 모델 파일 존재 여부 확인"""
+    # v5 추론 모델이 있으면 사용
+    if os.path.exists(_TRAINED_REC_MODEL_PATH + ".pdmodel"):
+        return True
+    # 추론 모델이 없으면 v5 학습된 모델 직접 사용 (best_accuracy)
+    trained_model_path = os.path.join(_PROJECT_ROOT, "output", "rec_ke_v5_model", "best_accuracy")
+    return os.path.exists(trained_model_path + ".pdparams")
+
+
+def _check_trained_det_model_available() -> bool:
+    """v5 학습된 Detection 모델 파일 존재 여부 확인 (PP-OCRv5_server_det)"""
+    return os.path.exists(_TRAINED_DET_MODEL_PATH + ".pdmodel")
+
+
+# 모듈 로드 시 자동으로 설정 파일 보정 (경로 변수 정의 이후 실행)
+try:
+    _ensure_trained_model_configs()
+except Exception as e:
+    # 모듈 로드 시점에는 경로가 아직 설정되지 않았을 수 있으므로 무시
+    pass
+
+
+def _get_paddleocr_instance(use_local: bool = False, use_trained: bool = True):
     """
-    PaddleOCR 인스턴스를 싱글톤으로 관리
-    use_local=False (기본값): 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5, 한글+영어 최적화)
-    use_local=True: 로컬 모델 사용 (v2.0 구버전, 권장하지 않음)
+    PaddleOCR 인스턴스를 싱글톤으로 관리 (v5 전용)
     
-    주의: 로컬 모델은 v2.0으로 오래된 버전이므로 최신 자동 다운로드 모델을 우선 사용합니다.
+    모델 우선순위:
+    1. v5 학습된 모델 (use_trained=True, 기본값): rec_ke_v5_inference + det_ke_inference (PP-OCRv5)
+    2. 기본 v5 모델 (use_trained=False): PP-OCRv5 자동 다운로드 모델
+    
+    Args:
+        use_local: 사용 안 함 (v2.0 구버전, 제거됨)
+        use_trained: v5 학습된 모델 사용 여부 (기본값: True)
+    
+    주의: v5 모델만 사용합니다. 과거 버전 모델은 사용하지 않습니다.
     """
-    global _PADDLEOCR_INSTANCE, _PADDLEOCR_LOCAL_INSTANCE
+    global _PADDLEOCR_INSTANCE, _PADDLEOCR_LOCAL_INSTANCE, _PADDLEOCR_TRAINED_INSTANCE
     
     try:
         from paddleocr import PaddleOCR
         
-        # 최신 자동 다운로드 모델 우선 사용 (PP-OCRv4/v5, 한글+영어 최적화)
+        # v5 학습된 모델 우선 사용 (코드 문법 인식 최적화, 88.96% 정확도)
+        if use_trained and _check_trained_model_available():
+            if _PADDLEOCR_TRAINED_INSTANCE is None:
+                try:
+                    # v5 추론 모델이 있으면 사용
+                    if os.path.exists(_TRAINED_REC_MODEL_PATH + ".pdmodel"):
+                        # inference.yml 파일 자동 보정 (Global.model_name 추가)
+                        print(f"[OK] v5 학습된 모델 설정 파일 검사 중...")
+                        _ensure_trained_model_configs()
+                        
+                        # inference.yml에서 character_dict 추출하여 사전 파일 생성 (로깅용)
+                        char_dict_path = _extract_character_dict_from_yml(_TRAINED_REC_INFERENCE_YML)
+                        
+                        # PaddleOCR 3.x API에 맞는 파라미터 구성 (CPU 전용)
+                        # 참고: inference.yml의 character_dict가 자동으로 사용됨
+                        # 주의: 커스텀 모델(rec_model_dir, text_detection_model_dir)을 사용하면 lang 파라미터는 무시됨
+                        # 따라서 lang 파라미터는 제거 (inference.yml의 character_dict가 영어+한글을 모두 포함)
+                        init_params = {
+                            'use_textline_orientation': True,  # 텍스트 방향 보정 (use_angle_cls의 새 이름)
+                            # 'lang': 'korean',  # 커스텀 모델 사용 시 무시되므로 제거 (inference.yml의 character_dict 사용)
+                            'device': 'cpu',  # CPU 전용 (GPU 메모리 절약) - use_gpu 대신 device 사용
+                        }
+                        
+                        # v5 학습된 Recognition 모델 사용
+                        if os.path.exists(_TRAINED_REC_MODEL_PATH + ".pdmodel"):
+                            # 구버전 호환성을 위해 rec_model_dir 사용 (model_name mismatch 방지)
+                            # PaddleX의 엄격한 검증을 피하기 위해 구버전 파라미터 사용
+                            init_params['rec_model_dir'] = _TRAINED_REC_MODEL_DIR
+                            print(f"[OK] v5 학습된 Recognition 모델 경로: {_TRAINED_REC_MODEL_DIR}")
+                            
+                            # inference.yml의 character_dict가 자동으로 사용됨
+                            if char_dict_path and os.path.exists(char_dict_path):
+                                print(f"[OK] inference.yml의 character_dict 사용 (사전 파일: {char_dict_path})")
+                            else:
+                                print(f"[WARN] character_dict.txt 생성 실패, inference.yml의 character_dict 사용")
+                        
+                        # v5 학습된 Detection 모델 사용 (가능한 경우)
+                        if _check_trained_det_model_available() and os.path.exists(_TRAINED_DET_MODEL_PATH + ".pdmodel"):
+                            # text_detection_model_dir 사용 (det_model_dir는 deprecated이지만 호환됨)
+                            init_params['text_detection_model_dir'] = _TRAINED_DET_MODEL_DIR
+                            print(f"[OK] v5 학습된 Detection 모델 경로: {_TRAINED_DET_MODEL_DIR} (PP-OCRv5_server_det)")
+                            print(f"[OK] PaddleOCR 초기화 중... (v5 학습된 Detection + Recognition 모델 사용, CPU 전용)")
+                        else:
+                            print(f"[OK] PaddleOCR 초기화 중... (v5 학습된 Recognition 모델 + 기본 v5 Detection 모델 사용, CPU 전용)")
+                        
+                        # PaddleOCR 인스턴스 생성
+                        _PADDLEOCR_TRAINED_INSTANCE = PaddleOCR(**init_params)
+                        print(f"[OK] PaddleOCR 초기화 완료 (v5 학습된 모델 사용, CPU 전용, inference.yml character_dict 적용, 코드 문법 인식 최적화, 88.96% 정확도)")
+                        
+                    else:
+                        # v5 추론 모델이 없으면 기본 v5 모델 사용
+                        print(f"[WARN] v5 학습된 추론 모델을 찾을 수 없습니다: {_TRAINED_REC_MODEL_PATH}")
+                        print(f"   기본 v5 모델로 fallback합니다.")
+                        _PADDLEOCR_TRAINED_INSTANCE = None
+                        
+                except KeyError as e:
+                    # KeyError는 inference.yml 설정 문제일 가능성이 높음
+                    print(f"[WARN] v5 학습된 모델 로드 실패 (설정 파일 오류): {e}")
+                    print(f"   inference.yml 파일을 다시 보정 시도합니다...")
+                    _ensure_trained_model_configs()
+                    # 한 번 더 시도 (PaddleOCR 3.x API 사용)
+                    try:
+                        char_dict_path = _extract_character_dict_from_yml(_TRAINED_REC_INFERENCE_YML)
+                        
+                        init_params = {
+                            'use_textline_orientation': True,
+                            # 'lang': 'korean',  # 커스텀 모델 사용 시 무시되므로 제거 (inference.yml의 character_dict 사용)
+                            'device': 'cpu',  # CPU 전용
+                        }
+                        if os.path.exists(_TRAINED_REC_MODEL_PATH + ".pdmodel"):
+                            init_params['text_recognition_model_dir'] = _TRAINED_REC_MODEL_DIR
+                            if char_dict_path and os.path.exists(char_dict_path):
+                                print(f"[OK] inference.yml의 character_dict 사용 (재시도, 사전 파일: {char_dict_path})")
+                        if _check_trained_det_model_available() and os.path.exists(_TRAINED_DET_MODEL_PATH + ".pdmodel"):
+                            init_params['text_detection_model_dir'] = _TRAINED_DET_MODEL_DIR
+                        _PADDLEOCR_TRAINED_INSTANCE = PaddleOCR(**init_params)
+                        print(f"[OK] PaddleOCR 초기화 완료 (재시도 성공, v5 모델, CPU 전용, inference.yml character_dict 적용)")
+                    except Exception as e2:
+                        print(f"[WARN] 재시도 실패: {e2}")
+                        import traceback
+                        print(f"   상세 오류: {traceback.format_exc()}")
+                        print(f"   기본 v5 모델로 fallback합니다.")
+                        _PADDLEOCR_TRAINED_INSTANCE = None
+                        
+                except Exception as e:
+                    print(f"[WARN] v5 학습된 모델 로드 실패: {e}")
+                    import traceback
+                    print(f"   상세 오류: {traceback.format_exc()}")
+                    print(f"   기본 v5 모델로 fallback합니다.")
+                    _PADDLEOCR_TRAINED_INSTANCE = None
+                    
+            if _PADDLEOCR_TRAINED_INSTANCE is not None:
+                return _PADDLEOCR_TRAINED_INSTANCE
+        
+        # 기본 v5 모델 사용 (PP-OCRv5, 한글+영어 최적화, CPU 전용)
         if _PADDLEOCR_INSTANCE is None:
             _PADDLEOCR_INSTANCE = PaddleOCR(
-                use_angle_cls=True,  # 텍스트 방향 보정
-                lang='korean',  # 한글+영어 자동 인식 (최신 PP-OCRv4/v5 모델)
-                use_gpu=False,  # CPU 사용
-                show_log=False,  # 로그 최소화
+                use_textline_orientation=True,  # 텍스트 방향 보정 (use_angle_cls의 새 이름)
+                lang='korean',  # 한글+영어 자동 인식 (PP-OCRv5 모델)
+                device='cpu',  # CPU 전용 (GPU 메모리 절약) - use_gpu 대신 device 사용
             )
-            print(f"✅ PaddleOCR 초기화 완료 (최신 자동 다운로드 모델, PP-OCRv4/v5, 한글+영어 최적화)")
+            print(f"[OK] PaddleOCR 초기화 완료 (기본 v5 모델, PP-OCRv5, 한글+영어 최적화, CPU 전용)")
         return _PADDLEOCR_INSTANCE
         
         # 로컬 모델은 v2.0 구버전이므로 사용하지 않음 (필요시 주석 해제)
@@ -1485,13 +1839,65 @@ def _get_paddleocr_instance(use_local: bool = False):
 
 
 def check_paddleocr_available():
-    """PaddleOCR 사용 가능 여부 확인 (최신 자동 다운로드 모델 사용)"""
+    """PaddleOCR 사용 가능 여부 확인 (v5 학습된 모델 우선 사용)"""
     try:
-        # 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5)
-        _get_paddleocr_instance(use_local=False)
+        # v5 학습된 모델 우선 사용 (코드 문법 인식 최적화)
+        _get_paddleocr_instance(use_local=False, use_trained=True)
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def _load_character_dict_from_yml(yml_path: str) -> Optional[List[str]]:
+    """
+    inference.yml에서 character_dict를 로드하여 리스트로 반환
+    """
+    if not os.path.exists(yml_path):
+        return None
+    
+    try:
+        with open(yml_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        
+        postprocess = config.get('PostProcess', {})
+        character_dict = postprocess.get('character_dict', [])
+        
+        if character_dict and isinstance(character_dict, list):
+            return [str(char) for char in character_dict if char]
+        return None
+    except Exception as e:
+        print(f"   ⚠ character_dict 로드 실패: {e}")
+        return None
+
+
+def load_character_dict_txt(txt_path: str) -> Optional[List[str]]:
+    """
+    character_dict.txt 파일을 직접 로드하여 리스트로 반환
+    학습 시 사용한 character_dict.txt 기준으로 직접 디코딩에 사용
+    
+    Args:
+        txt_path: character_dict.txt 파일 경로
+        
+    Returns:
+        character_dict 리스트 (각 인덱스가 문자)
+    """
+    if not os.path.exists(txt_path):
+        print(f"   ⚠ character_dict.txt 파일이 없습니다: {txt_path}")
+        return None
+    
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            char_dict = [line.strip() for line in f.readlines() if line.strip()]
+        
+        if char_dict:
+            print(f"   ✅ character_dict.txt 로드 완료 ({len(char_dict)}개 문자)")
+            return char_dict
+        else:
+            print(f"   ⚠ character_dict.txt가 비어있습니다: {txt_path}")
+            return None
+    except Exception as e:
+        print(f"   ⚠ character_dict.txt 로드 실패: {txt_path}, 오류: {e}")
+        return None
 
 
 def paddleocr_word_boxes(
@@ -1499,50 +1905,805 @@ def paddleocr_word_boxes(
     *,
     code_mode: bool = True,
     remove_emoji: bool = True,
-    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+    use_local_model: bool = False,  # 사용 안 함 (v2.0 구버전, 제거됨)
+    use_trained_model: bool = True,  # 기본값: v5 학습된 모델 사용 (코드 문법 인식 최적화)
 ) -> List[WordBox]:
-    """PaddleOCR로 WordBox 리스트 추출 (최신 PP-OCRv4/v5 모델 사용)"""
+    """PaddleOCR로 WordBox 리스트 추출 (v5 학습된 모델 우선 사용, 코드 문법 인식 최적화)"""
     try:
-        ocr = _get_paddleocr_instance(use_local=use_local_model)
+        # v5 학습된 모델 인스턴스 가져오기
+        ocr = _get_paddleocr_instance(use_local=use_local_model, use_trained=use_trained_model)
+        
+        # 이미지 정보 확인
+        img_width, img_height = pil_img.size
+        print(f"   이미지 크기: {img_width}x{img_height}px")
+        
         # PIL Image를 numpy array로 변환
         img_array = np.array(pil_img)
         if len(img_array.shape) == 2:  # Grayscale
             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+            print(f"   이미지 형식: Grayscale → RGB 변환")
         elif img_array.shape[2] == 4:  # RGBA
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+            print(f"   이미지 형식: RGBA → RGB 변환")
+        else:
+            print(f"   이미지 형식: RGB (shape: {img_array.shape})")
         
         # OCR 실행
-        result = ocr.ocr(img_array, cls=True)
+        # use_angle_cls=True가 이미 초기화 시 설정되어 있으므로 cls 파라미터 불필요
+        print(f"   OCR 실행 중...")
+        result = ocr.ocr(img_array)
+        print(f"   OCR 실행 완료, 결과 타입: {type(result)}")
         
+        # 디버깅: 결과 구조 확인
+        if result is None:
+            print(f"   ⚠ PaddleOCR 결과가 None입니다. (이미지에 텍스트가 없거나 모델 오류)")
+            return []
+        
+        # 결과 타입 안전하게 확인 (dict가 아닌 list/tuple만 허용)
+        # dict인 경우 KeyError: 0 방지를 위해 별도 처리
+        if isinstance(result, dict):
+            print(f"   ⚠ PaddleOCR 결과가 dict 타입입니다. 키 목록: {list(result.keys())[:10]}")
+            # dict인 경우 첫 번째 값이나 특정 키를 시도
+            if len(result) > 0:
+                first_key = next(iter(result.keys()))
+                result = [result[first_key]]  # dict의 첫 번째 값을 리스트로 변환
+                print(f"   ✅ dict의 첫 번째 값({first_key})을 리스트로 변환")
+            else:
+                print(f"   ⚠ dict가 비어있습니다.")
+                return []
+        
+        # 디버깅: 실제 결과 구조 상세 출력 (안전하게)
+        # result가 list/tuple인지 확인 (dict는 이미 처리됨)
+        if isinstance(result, (list, tuple)) and len(result) > 0:
+            try:
+                img_result_raw = result[0]
+                print(f"   디버깅: result[0] 타입: {type(img_result_raw)}")
+                
+                # PaddleX OCRResult 객체인지 확인
+                if hasattr(img_result_raw, '__class__'):
+                    class_name = img_result_raw.__class__.__name__
+                    print(f"   디버깅: result[0] 클래스명: {class_name}")
+                    if 'OCRResult' in class_name or 'Result' in class_name:
+                        # 안전하게 객체 정보 출력
+                        try:
+                            obj_str = str(img_result_raw)[:200] if hasattr(img_result_raw, '__str__') else repr(img_result_raw)[:200]
+                            print(f"   📦 PaddleX OCRResult 객체 감지: {obj_str}")
+                            # 주요 속성만 안전하게 확인
+                            safe_attrs = [attr for attr in dir(img_result_raw) if not attr.startswith('_') and not callable(getattr(img_result_raw, attr, None))]
+                            print(f"   📦 사용 가능한 속성 (일부): {safe_attrs[:10]}")
+                        except Exception as e:
+                            print(f"   📦 PaddleX OCRResult 객체 감지 (정보 출력 실패: {type(e).__name__})")
+                
+                # 안전하게 첫 번째 요소 확인 시도 (KeyError 방지)
+                try:
+                    if img_result_raw is not None:
+                        # __getitem__이 있는지 확인
+                        if hasattr(img_result_raw, '__getitem__'):
+                            try:
+                                first_elem = img_result_raw[0]
+                                if first_elem is not None:
+                                    first_elem_str = str(first_elem)[:100] if not isinstance(first_elem, (list, dict)) else f"{type(first_elem)} (복합 객체)"
+                                    print(f"   디버깅: result[0][0] 타입: {type(first_elem)}, 값: {first_elem_str}")
+                            except (KeyError, TypeError, IndexError, AttributeError) as e:
+                                print(f"   디버깅: result[0][0] 접근 불가 (예상됨 - OCRResult 객체): {type(e).__name__}")
+                        else:
+                            print(f"   디버깅: result[0]는 인덱스 접근 불가 객체")
+                except Exception as e:
+                    print(f"   디버깅: result[0] 정보 확인 중 오류: {type(e).__name__}")
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"   ⚠ result[0] 접근 실패: {type(e).__name__}: {e}")
+                print(f"   결과 구조: {str(result)[:200]}")
+                return []
+        elif not isinstance(result, (list, tuple)):
+            print(f"   ⚠ PaddleOCR 결과가 예상치 못한 타입입니다: {type(result)}")
+            print(f"   결과 내용: {str(result)[:200]}")
+            # 다른 타입인 경우 그대로 처리 시도
+            result = [result]  # 단일 객체를 리스트로 감싸기
+        
+        # PaddleOCR 3.x 결과 구조: [[[bbox, (text, conf)], ...], ...] 또는 None
+        # PaddleX OCRResult 객체도 처리 가능하도록 수정
+        # 첫 번째 이미지의 결과를 가져옴
         words: List[WordBox] = []
-        if result and result[0]:
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    # line 구조: [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], (text, confidence)]
-                    bbox = line[0]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                    text_info = line[1]  # (text, confidence)
+        
+        # 결과가 리스트인지 확인 (dict는 이미 처리됨)
+        if isinstance(result, (list, tuple)) and len(result) > 0:
+            try:
+                # 첫 번째 이미지 결과 (KeyError 방지를 위해 try-except 사용)
+                img_result_raw = result[0] if result[0] is not None else None
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"   ⚠ result[0] 접근 실패: {type(e).__name__}: {e}")
+                print(f"   결과 타입: {type(result)}, 길이: {len(result) if hasattr(result, '__len__') else 'N/A'}")
+                return []
+            
+            if img_result_raw is None:
+                print(f"   ⚠ PaddleOCR 결과가 None입니다 (이미지에서 텍스트를 찾지 못함)")
+                return []
+            
+            # PaddleX OCRResult 객체 처리
+            img_result = None
+            if hasattr(img_result_raw, '__class__'):
+                class_name = img_result_raw.__class__.__name__
+                
+                # OCRResult 객체인 경우
+                if 'OCRResult' in class_name or 'Result' in class_name:
+                    print(f"   🔍 PaddleX OCRResult 객체 처리 중...")
                     
-                    if text_info and len(text_info) >= 2:
-                        text = text_info[0]
-                        conf = float(text_info[1])
+                    # 방법 1: doc_res 속성 확인 (가장 중요 - 실제 OCR 결과가 여기 있음)
+                    if hasattr(img_result_raw, 'doc_res'):
+                        try:
+                            doc_res_data = img_result_raw.doc_res
+                            if doc_res_data is not None:
+                                # doc_res의 모든 속성 확인 (디버깅)
+                                if hasattr(doc_res_data, '__dict__'):
+                                    doc_res_attrs = [attr for attr in dir(doc_res_data) if not attr.startswith('_')]
+                                    print(f"   🔍 doc_res 속성 목록: {doc_res_attrs[:20]}")
+                                
+                                # doc_res가 객체인 경우 rec_texts 속성 확인
+                                if hasattr(doc_res_data, 'rec_texts'):
+                                    # 이미 디코딩된 텍스트가 있는 경우
+                                    texts_from_doc_res = getattr(doc_res_data, 'rec_texts', [])
+                                    if texts_from_doc_res:
+                                        print(f"   ✅ doc_res.rec_texts에서 직접 텍스트 추출 성공 ({len(texts_from_doc_res)}개)")
+                                        # 샘플 확인
+                                        if len(texts_from_doc_res) > 0:
+                                            sample = str(texts_from_doc_res[0])[:50] if texts_from_doc_res[0] is not None else "None"
+                                            print(f"   🔍 doc_res.rec_texts[0] 샘플: '{sample}'")
+                                        # doc_res를 그대로 사용 (rec_texts가 이미 있음)
+                                        img_result = doc_res_data
+                                    else:
+                                        img_result = doc_res_data
+                                        print(f"   ✅ doc_res 속성에서 데이터 추출 성공 (타입: {type(doc_res_data)}, rec_texts 비어있음)")
+                                elif isinstance(doc_res_data, dict):
+                                    # dict인 경우 rec_texts 확인
+                                    if 'rec_texts' in doc_res_data:
+                                        rec_texts_list = doc_res_data.get('rec_texts', [])
+                                        print(f"   ✅ doc_res (dict)에서 rec_texts 발견 ({len(rec_texts_list)}개)")
+                                        if len(rec_texts_list) > 0:
+                                            sample = str(rec_texts_list[0])[:50] if rec_texts_list[0] is not None else "None"
+                                            print(f"   🔍 doc_res['rec_texts'][0] 샘플: '{sample}'")
+                                    img_result = doc_res_data
+                                    print(f"   ✅ doc_res (dict) 속성에서 데이터 추출 성공")
+                                else:
+                                    img_result = doc_res_data
+                                    print(f"   ✅ doc_res 속성에서 데이터 추출 성공 (타입: {type(doc_res_data)})")
+                        except Exception as e:
+                            print(f"   ⚠ doc_res 접근 실패: {e}")
+                            import traceback
+                            print(f"   상세 오류: {traceback.format_exc()}")
+                    
+                    # 방법 2: json 속성 확인 (PaddleX OCRResult의 주요 데이터 소스)
+                    if img_result is None and hasattr(img_result_raw, 'json'):
+                        try:
+                            json_data = img_result_raw.json
+                            print(f"   🔍 json 속성 타입: {type(json_data)}")
+                            
+                            if isinstance(json_data, dict):
+                                print(f"   🔍 json 키 목록: {list(json_data.keys())[:10]}")
+                                
+                                # 'res' 키 확인 (PaddleX OCRResult의 실제 구조)
+                                if 'res' in json_data:
+                                    res_data = json_data['res']
+                                    print(f"   🔍 json['res'] 발견, 타입: {type(res_data)}")
+                                    
+                                    # res가 리스트인 경우 (PaddleOCR 3.x 표준 형식)
+                                    if isinstance(res_data, list) and len(res_data) > 0:
+                                        print(f"   ✅ json['res']가 리스트입니다 (길이: {len(res_data)}) - PaddleOCR 3.x 표준 형식")
+                                        # res_data가 바로 OCR 결과 리스트이므로 img_result로 설정
+                                        img_result = res_data
+                                        print(f"   ✅ json['res'] 리스트를 img_result로 설정")
+                                    # res가 dict인 경우
+                                    elif isinstance(res_data, dict):
+                                        if 'doc_res' in res_data:
+                                            doc_res_json = res_data['doc_res']
+                                            if isinstance(doc_res_json, dict):
+                                                img_result = doc_res_json
+                                                print(f"   ✅ json.res.doc_res에서 데이터 추출 성공")
+                                            else:
+                                                img_result = doc_res_json
+                                                print(f"   ✅ json.res.doc_res에서 데이터 추출 성공 (dict 아님)")
+                                        elif 'rec_texts' in res_data:
+                                            # rec_texts가 있는지 확인
+                                            rec_texts_list = res_data.get('rec_texts', [])
+                                            print(f"   🔍 json.res.rec_texts 발견: {len(rec_texts_list)}개")
+                                            # 디버깅: rec_texts의 첫 번째 요소 확인
+                                            if rec_texts_list and len(rec_texts_list) > 0:
+                                                print(f"   🔍 rec_texts[0] 타입: {type(rec_texts_list[0])}, 값: {repr(str(rec_texts_list[0])[:50])}")
+                                            img_result = res_data
+                                            print(f"   ✅ json.res에서 직접 데이터 추출 성공 (rec_texts 있음)")
+                                        else:
+                                            print(f"   🔍 json.res 키 목록: {list(res_data.keys())[:20]}")
+                                            # json['res']의 실제 구조를 더 자세히 확인
+                                            import json as json_module
+                                            res_data_str = json_module.dumps(res_data, ensure_ascii=False, indent=2)
+                                            print(f"   🔍 json['res'] 전체 구조 (처음 1000자): {res_data_str[:1000]}")
+                                            img_result = res_data
+                                # doc_res가 있는 경우
+                                elif 'doc_res' in json_data:
+                                    doc_res_json = json_data['doc_res']
+                                    print(f"   ✅ json.doc_res 발견, 타입: {type(doc_res_json)}")
+                                    
+                                    # doc_res가 dict인 경우
+                                    if isinstance(doc_res_json, dict):
+                                        # rec_texts가 있는지 확인
+                                        if 'rec_texts' in doc_res_json:
+                                            rec_texts_list = doc_res_json.get('rec_texts', [])
+                                            print(f"   ✅ json.doc_res.rec_texts 발견 ({len(rec_texts_list)}개)")
+                                            if len(rec_texts_list) > 0:
+                                                sample = str(rec_texts_list[0])[:50] if rec_texts_list[0] is not None else "None"
+                                                print(f"   🔍 json.doc_res.rec_texts[0] 샘플: '{sample}'")
+                                        img_result = doc_res_json
+                                    else:
+                                        img_result = doc_res_json
+                                elif 'result' in json_data:
+                                    img_result = json_data['result']
+                                    print(f"   ✅ json.result에서 데이터 추출 성공")
+                                elif 'rec_texts' in json_data:
+                                    # json에 직접 rec_texts가 있는 경우
+                                    rec_texts_list = json_data.get('rec_texts', [])
+                                    print(f"   ✅ json.rec_texts 직접 발견 ({len(rec_texts_list)}개)")
+                                    img_result = json_data
+                            elif isinstance(json_data, str):
+                                # json이 문자열인 경우 파싱 시도
+                                try:
+                                    import json
+                                    json_parsed = json.loads(json_data)
+                                    print(f"   ✅ json 문자열 파싱 성공, 타입: {type(json_parsed)}")
+                                    if isinstance(json_parsed, dict):
+                                        if 'doc_res' in json_parsed:
+                                            img_result = json_parsed['doc_res']
+                                            print(f"   ✅ 파싱된 json.doc_res에서 데이터 추출 성공")
+                                        elif 'rec_texts' in json_parsed:
+                                            img_result = json_parsed
+                                            print(f"   ✅ 파싱된 json에서 직접 데이터 추출 성공")
+                                except Exception as e:
+                                    print(f"   ⚠ json 문자열 파싱 실패: {e}")
+                            elif isinstance(json_data, list):
+                                img_result = json_data
+                                print(f"   ✅ json에서 리스트 데이터 추출 성공")
+                        except Exception as e:
+                            print(f"   ⚠ json 접근 실패: {e}")
+                            import traceback
+                            print(f"   상세 오류: {traceback.format_exc()}")
+                    
+                    # 방법 3: dict처럼 접근
+                    if img_result is None and isinstance(img_result_raw, dict):
+                        if 'doc_res' in img_result_raw:
+                            img_result = img_result_raw['doc_res']
+                            print(f"   ✅ dict['doc_res']에서 데이터 추출 성공")
+                        elif 'result' in img_result_raw:
+                            img_result = img_result_raw['result']
+                            print(f"   ✅ dict['result']에서 데이터 추출 성공")
+                    
+                    # 방법 4: 순회 가능한 객체인 경우 (dict가 아닌 경우만)
+                    if img_result is None and hasattr(img_result_raw, '__iter__') and not isinstance(img_result_raw, (str, dict)):
+                        try:
+                            # 리스트로 변환 시도
+                            temp_list = list(img_result_raw)
+                            if len(temp_list) > 0:
+                                img_result = temp_list
+                                print(f"   ✅ 순회 가능한 객체를 리스트로 변환 성공 ({len(temp_list)}개 요소)")
+                        except Exception as e:
+                            print(f"   ⚠ 순회 변환 실패: {e}")
+                    
+                    # 방법 5: 속성 직접 확인
+                    if img_result is None:
+                        # 모든 속성 확인
+                        try:
+                            attrs = [attr for attr in dir(img_result_raw) if not attr.startswith('_') and not callable(getattr(img_result_raw, attr, None))]
+                            print(f"   🔍 사용 가능한 속성: {attrs[:15]}")
+                            
+                            # 일반적인 속성명 시도
+                            for attr_name in ['results', 'data', 'output', 'lines', 'texts', 'ocr_result', 'rec_result', 'det_result']:
+                                if hasattr(img_result_raw, attr_name):
+                                    try:
+                                        potential_data = getattr(img_result_raw, attr_name)
+                                        if isinstance(potential_data, (list, tuple)) and len(potential_data) > 0:
+                                            img_result = potential_data
+                                            print(f"   ✅ {attr_name} 속성에서 데이터 추출 성공 ({len(potential_data)}개 요소)")
+                                            break
+                                        elif isinstance(potential_data, dict):
+                                            # dict 내부에 리스트가 있는지 확인
+                                            for key in ['doc_res', 'result', 'data', 'lines']:
+                                                if key in potential_data and isinstance(potential_data[key], (list, tuple)):
+                                                    img_result = potential_data[key]
+                                                    print(f"   ✅ {attr_name}.{key}에서 데이터 추출 성공")
+                                                    break
+                                            if img_result is not None:
+                                                break
+                                    except Exception as e:
+                                        continue
+                        except Exception as e:
+                            print(f"   ⚠ 속성 확인 중 오류: {e}")
+            
+            # OCRResult 객체가 아니거나 변환 실패한 경우 원본 사용
+            if img_result is None:
+                img_result = img_result_raw
+            
+            # 최종 검증 및 데이터 정규화
+            if img_result is None:
+                print(f"   ⚠ PaddleOCR 결과가 None입니다 (이미지에서 텍스트를 찾지 못함)")
+                return []
+            
+            # OCRResult 객체 또는 dict에서 실제 데이터 추출 (rec_texts, dt_polys, rec_scores)
+            texts = []
+            polys = []
+            scores = []
+            use_ocr_result_format = False
+            
+            # OCRResult 객체인지 먼저 확인 (dict 체크보다 우선)
+            if hasattr(img_result, '__class__'):
+                class_name = img_result.__class__.__name__
+                if 'OCRResult' in class_name or 'Result' in class_name:
+                    print(f"   🔍 OCRResult 객체 감지, rec_texts/dt_polys/rec_scores 추출 중...")
+                    use_ocr_result_format = True
+                    
+                    # 방법 1: doc_res 속성을 통한 접근 (가장 정확)
+                    if hasattr(img_result, 'doc_res'):
+                        try:
+                            doc_res = img_result.doc_res
+                            if doc_res is not None:
+                                # doc_res가 객체인 경우
+                                if hasattr(doc_res, 'rec_texts'):
+                                    texts = getattr(doc_res, 'rec_texts', None)
+                                    polys = getattr(doc_res, 'dt_polys', None)
+                                    scores = getattr(doc_res, 'rec_scores', None)
+                                    print(f"   ✅ doc_res.rec_texts에서 직접 추출 성공")
+                                # doc_res가 dict인 경우
+                                elif isinstance(doc_res, dict):
+                                    texts = doc_res.get('rec_texts', None)
+                                    polys = doc_res.get('dt_polys', None)
+                                    scores = doc_res.get('rec_scores', None)
+                                    print(f"   ✅ doc_res (dict)에서 직접 추출 성공")
+                        except Exception as e:
+                            print(f"   ⚠ doc_res 접근 실패: {e}")
+                    
+                    # 방법 2: json 속성 사용 (PaddleX OCRResult의 주요 데이터 소스)
+                    if texts is None and hasattr(img_result, 'json'):
+                        try:
+                            json_data = img_result.json
+                            print(f"   🔍 json 속성 타입: {type(json_data)}")
+                            
+                            if isinstance(json_data, dict):
+                                # json이 dict인 경우
+                                # 먼저 'res' 키 확인 (PaddleX OCRResult의 실제 구조)
+                                if 'res' in json_data:
+                                    res_data = json_data.get("res", {})
+                                    
+                                    # ========================================
+                                    # 1️⃣ json['res'] 구조 및 키 전체 출력 (최우선)
+                                    # ========================================
+                                    print("🔍 json['res'] 전체 키 목록:", list(res_data.keys()))
+                                    
+                                    import json as json_module
+                                    try:
+                                        res_preview = json_module.dumps(
+                                            res_data,
+                                            ensure_ascii=False,
+                                            indent=2,
+                                            default=str
+                                        )
+                                        print("🔍 json['res'] 전체 구조 미리보기 (앞 2000자):")
+                                        print(res_preview[:2000])
+                                    except Exception as e:
+                                        print(f"⚠ json['res'] 구조 출력 실패: {e}")
+                                    
+                                    print(f"   🔍 json['res'] 타입: {type(res_data)}")
+                                    
+                                    # res가 dict인 경우
+                                    if isinstance(res_data, dict):
+                                        # ========================================
+                                        # 2️⃣ rec_indices 존재 여부에 따른 분기 처리 (최우선)
+                                        # ========================================
+                                        if "rec_indices" in res_data:
+                                            print("✅ rec_indices 발견, 직접 디코딩 로직 사용")
+                                            
+                                            # character_dict.txt 직접 로드 (학습 시 사용한 기준)
+                                            char_dict_path = os.path.join(_TRAINED_REC_MODEL_DIR, "character_dict.txt")
+                                            char_dict = load_character_dict_txt(char_dict_path)
+                                            
+                                            if char_dict:
+                                                # rec_indices를 사용하여 직접 디코딩
+                                                rec_indices = res_data.get("rec_indices", [])
+                                                texts = []
+                                                
+                                                for indices in rec_indices:
+                                                    if not isinstance(indices, (list, tuple)):
+                                                        continue
+                                                    
+                                                    decoded_chars = []
+                                                    for idx in indices:
+                                                        if isinstance(idx, int) and 0 <= idx < len(char_dict):
+                                                            decoded_chars.append(char_dict[idx])
+                                                    
+                                                    texts.append("".join(decoded_chars))
+                                                
+                                                # polys와 scores 추출
+                                                polys = res_data.get('dt_polys', [])
+                                                scores = res_data.get('rec_scores', [])
+                                                
+                                                print(f"   ✅ rec_indices로 직접 디코딩 완료: texts={len(texts) if texts else 0}개")
+                                                
+                                                # ========================================
+                                                # 3️⃣ 디코딩 결과 검증 로그
+                                                # ========================================
+                                                if texts and len(texts) > 0:
+                                                    print("🧪 디코딩 검증 샘플")
+                                                    if len(rec_indices) > 0:
+                                                        print(f"   rec_indices[0][:20]: {rec_indices[0][:20] if len(rec_indices[0]) > 20 else rec_indices[0]}")
+                                                    print(f"   decoded_text: {texts[0]}")
+                                                    # 정상 기준: def, if, :, {, }, return 등 코드 문자가 정상 출력되면 성공
+                                                
+                                                # texts, polys, scores가 설정되었으므로 이후 로직으로 진행
+                                            else:
+                                                print("   ⚠ character_dict.txt 로드 실패, rec_texts fallback 사용")
+                                                texts = res_data.get('rec_texts', [])
+                                                polys = res_data.get('dt_polys', [])
+                                                scores = res_data.get('rec_scores', [])
+                                        # res 안에 doc_res가 있는지 확인
+                                        elif 'doc_res' in res_data:
+                                            doc_res_json = res_data['doc_res']
+                                            if isinstance(doc_res_json, dict):
+                                                texts = doc_res_json.get('rec_texts', [])
+                                                polys = doc_res_json.get('dt_polys', [])
+                                                scores = doc_res_json.get('rec_scores', [])
+                                                print(f"   ✅ json.res.doc_res에서 추출 성공: texts={len(texts) if texts else 0}개")
+                                        # res 안에 직접 rec_texts가 있는지 확인
+                                        elif 'rec_texts' in res_data:
+                                            texts = res_data.get('rec_texts', [])
+                                            polys = res_data.get('dt_polys', [])
+                                            scores = res_data.get('rec_scores', [])
+                                            print(f"   ✅ json.res에서 직접 추출 성공: texts={len(texts) if texts else 0}개")
+                                            # 디버깅: texts의 실제 타입과 값 확인
+                                            if texts and len(texts) > 0:
+                                                print(f"   🔍 texts[0] 타입: {type(texts[0])}, 값 샘플: {repr(str(texts[0])[:50])}")
+                                                # texts가 인덱스 리스트인지 확인
+                                                if isinstance(texts[0], (int, list)):
+                                                    print(f"   ⚠ texts가 인덱스 형태입니다! character_dict 디코딩 필요")
+                                        else:
+                                            # rec_indices가 없는 경우
+                                            print("⚠ rec_indices 없음 → rec_texts fallback 사용")
+                                            print(f"   🔍 json.res 키 목록: {list(res_data.keys())[:20]}")
+                                            # rec_indices가 없는 경우, 모델 export 단계 문제 가능성
+                                            print("   💡 참고: rec_indices가 없으면 Recognition 모델 재-export 필요할 수 있음")
+                                            texts = res_data.get('rec_texts', [])
+                                            polys = res_data.get('dt_polys', [])
+                                            scores = res_data.get('rec_scores', [])
+                                    # res가 list인 경우 (직접 결과 리스트) - PaddleOCR 3.x 표준 형식
+                                    elif isinstance(res_data, list) and len(res_data) > 0:
+                                        # PaddleOCR 3.x 표준 형식: [[[bbox], (text, conf)], ...]
+                                        # 이 경우 res_data가 바로 OCR 결과 리스트이므로 img_result로 사용
+                                        print(f"   🔍 json['res']가 리스트입니다 (길이: {len(res_data)})")
+                                        # 첫 번째 요소 샘플 확인
+                                        if len(res_data) > 0:
+                                            print(f"   🔍 res_data[0] 타입: {type(res_data[0])}, 값 샘플: {str(res_data[0])[:100]}")
+                                        # 리스트의 첫 번째 요소가 dict인 경우 (다른 형식)
+                                        if isinstance(res_data[0], dict):
+                                            first_item = res_data[0]
+                                            if 'rec_texts' in first_item:
+                                                texts = first_item.get('rec_texts', [])
+                                                polys = first_item.get('dt_polys', [])
+                                                scores = first_item.get('rec_scores', [])
+                                                print(f"   ✅ json.res[0]에서 추출 성공: texts={len(texts) if texts else 0}개")
+                                            elif 'text' in first_item:
+                                                # text 필드가 있는 경우 (다른 형식)
+                                                texts = [first_item.get('text', '')]
+                                                bbox = first_item.get('bbox', [])
+                                                if bbox:
+                                                    polys = [bbox]
+                                                conf = first_item.get('confidence', 0.0)
+                                                if conf:
+                                                    scores = [conf]
+                                                print(f"   ✅ json.res[0]에서 text 형식으로 추출 성공: texts={len(texts) if texts else 0}개")
+                                        else:
+                                            # PaddleOCR 3.x 표준 형식: [[[bbox], (text, conf)], ...]
+                                            # res_data가 바로 OCR 결과 리스트이지만, 이 블록은 두 번째 OCRResult 처리 부분이므로
+                                            # 첫 번째 처리 부분에서 이미 img_result가 설정되었을 것임
+                                            # 여기서는 texts/polys/scores를 추출할 수 없으므로 None으로 유지
+                                            print(f"   🔍 json['res']가 리스트입니다 (길이: {len(res_data)}) - 첫 번째 처리 부분에서 이미 처리됨")
+                                # 기존 로직: doc_res 직접 확인
+                                elif 'doc_res' in json_data:
+                                    doc_res_json = json_data['doc_res']
+                                    if isinstance(doc_res_json, dict):
+                                        texts = doc_res_json.get('rec_texts', [])
+                                        polys = doc_res_json.get('dt_polys', [])
+                                        scores = doc_res_json.get('rec_scores', [])
+                                        print(f"   ✅ json.doc_res에서 추출 성공: texts={len(texts) if texts else 0}개")
+                                # 기존 로직: rec_texts 직접 확인
+                                elif 'rec_texts' in json_data:
+                                    texts = json_data.get('rec_texts', [])
+                                    polys = json_data.get('dt_polys', [])
+                                    scores = json_data.get('rec_scores', [])
+                                    print(f"   ✅ json에서 직접 추출 성공: texts={len(texts) if texts else 0}개")
+                                else:
+                                    print(f"   🔍 json 키 목록: {list(json_data.keys())[:10]}")
+                                    # json 구조 전체 출력 (디버깅용)
+                                    import json as json_module
+                                    json_str = json_module.dumps(json_data, ensure_ascii=False, indent=2)
+                                    print(f"   🔍 json 전체 구조 (처음 500자): {json_str[:500]}")
+                            elif isinstance(json_data, str):
+                                # json이 문자열인 경우 파싱 시도
+                                try:
+                                    import json
+                                    json_parsed = json.loads(json_data)
+                                    if isinstance(json_parsed, dict):
+                                        if 'doc_res' in json_parsed:
+                                            doc_res_json = json_parsed['doc_res']
+                                            if isinstance(doc_res_json, dict):
+                                                texts = doc_res_json.get('rec_texts', [])
+                                                polys = doc_res_json.get('dt_polys', [])
+                                                scores = doc_res_json.get('rec_scores', [])
+                                                print(f"   ✅ json 문자열 파싱 후 doc_res에서 추출 성공: texts={len(texts) if texts else 0}개")
+                                        elif 'rec_texts' in json_parsed:
+                                            texts = json_parsed.get('rec_texts', [])
+                                            polys = json_parsed.get('dt_polys', [])
+                                            scores = json_parsed.get('rec_scores', [])
+                                            print(f"   ✅ json 문자열 파싱 후 직접 추출 성공: texts={len(texts) if texts else 0}개")
+                                except Exception as e:
+                                    print(f"   ⚠ json 문자열 파싱 실패: {e}")
+                        except Exception as e:
+                            print(f"   ⚠ json 속성 접근 실패: {e}")
+                            import traceback
+                            print(f"   상세 오류: {traceback.format_exc()}")
+                    
+                    # 방법 3: str 속성 사용 (문자열로 변환된 결과)
+                    if texts is None and hasattr(img_result, 'str'):
+                        try:
+                            str_data = img_result.str
+                            print(f"   🔍 str 속성 타입: {type(str_data)}, 길이: {len(str(str_data)) if str_data else 0}")
+                            # str 속성은 보통 문자열 표현이므로, 여기서는 직접 사용하기 어려움
+                            # 하지만 디버깅용으로 출력
+                            if str_data:
+                                print(f"   🔍 str 속성 샘플: {str(str_data)[:200]}")
+                        except Exception as e:
+                            print(f"   ⚠ str 속성 접근 실패: {e}")
+                    
+                    # 방법 4: 객체 속성으로 직접 접근 (doc_res가 없는 경우)
+                    if texts is None:
+                        texts = getattr(img_result, 'rec_texts', None)
+                        polys = getattr(img_result, 'dt_polys', None)
+                        scores = getattr(img_result, 'rec_scores', None)
+                        if texts is not None:
+                            print(f"   ✅ 객체 속성에서 직접 추출 성공")
+                    
+                    # None인 경우 dict 접근 시도
+                    if texts is None:
+                        if hasattr(img_result, '__getitem__'):
+                            try:
+                                texts = img_result.get('rec_texts', []) if hasattr(img_result, 'get') else img_result['rec_texts'] if 'rec_texts' in img_result else []
+                                polys = img_result.get('dt_polys', []) if hasattr(img_result, 'get') else img_result['dt_polys'] if 'dt_polys' in img_result else []
+                                scores = img_result.get('rec_scores', []) if hasattr(img_result, 'get') else img_result['rec_scores'] if 'rec_scores' in img_result else []
+                            except (KeyError, TypeError, AttributeError):
+                                texts = []
+                                polys = []
+                                scores = []
+                        else:
+                            texts = []
+                            polys = []
+                            scores = []
+            
+            # OCRResult 객체가 아니고 dict인 경우
+            if not use_ocr_result_format and isinstance(img_result, dict):
+                print(f"   🔍 dict 형태 결과 감지, rec_texts/dt_polys/rec_scores 추출 시도...")
+                use_ocr_result_format = True
+                
+                texts = img_result.get('rec_texts', [])
+                polys = img_result.get('dt_polys', [])
+                scores = img_result.get('rec_scores', [])
+            
+            # OCRResult 형식 데이터가 추출된 경우 처리
+            if use_ocr_result_format and texts is not None:
+                # 리스트가 아닌 경우 변환 시도
+                if not isinstance(texts, (list, tuple)):
+                    texts = list(texts) if hasattr(texts, '__iter__') and not isinstance(texts, str) else []
+                if not isinstance(polys, (list, tuple)):
+                    polys = list(polys) if hasattr(polys, '__iter__') and not isinstance(polys, str) else []
+                if not isinstance(scores, (list, tuple)):
+                    scores = list(scores) if hasattr(scores, '__iter__') and not isinstance(scores, str) else []
+                
+                print(f"   ✅ OCRResult 데이터 추출 완료: texts={len(texts)}개, polys={len(polys)}개, scores={len(scores)}개")
+                
+                # 디버깅: 추출된 텍스트 샘플 확인 (처음 5개)
+                if len(texts) > 0:
+                    sample_texts = [str(texts[i])[:50] for i in range(min(5, len(texts)))]
+                    print(f"   🔍 추출된 텍스트 샘플 (처음 5개): {sample_texts}")
+                    # 텍스트가 인덱스(숫자)인지 확인
+                    if len(texts) > 0:
+                        first_text = str(texts[0])
+                        if first_text.isdigit() or (first_text.startswith('[') and ']' in first_text):
+                            print(f"   ⚠ 경고: rec_texts가 인덱스로 보입니다! character_dict 디코딩이 필요할 수 있습니다.")
+                            print(f"   🔍 첫 번째 텍스트 값: {first_text} (타입: {type(texts[0])})")
+                
+                # 텍스트가 없으면 빈 결과 반환
+                if len(texts) == 0:
+                    print(f"   ⚠ rec_texts가 비어있습니다 (이미지에서 텍스트를 찾지 못함)")
+                    return []
+            
+            # 일반 리스트 형태인 경우 (기존 로직)
+            if not use_ocr_result_format:
+                # dict 형태인 경우 리스트로 변환 시도
+                if isinstance(img_result, dict):
+                    print(f"   🔍 dict 형태 결과 감지, 키: {list(img_result.keys())[:10]}")
+                    # 일반적인 키 이름 확인
+                    for key in ['doc_res', 'result', 'data', 'lines', 'texts', 'ocr_result']:
+                        if key in img_result and isinstance(img_result[key], (list, tuple)):
+                            img_result = img_result[key]
+                            print(f"   ✅ dict['{key}']에서 리스트 데이터 추출 성공")
+                            break
+                    # 여전히 dict인 경우 첫 번째 값 사용
+                    if isinstance(img_result, dict):
+                        first_value = next(iter(img_result.values())) if img_result else None
+                        if isinstance(first_value, (list, tuple)):
+                            img_result = first_value
+                            print(f"   ✅ dict의 첫 번째 값에서 리스트 데이터 추출 성공")
+                
+                # 빈 결과 확인
+                if hasattr(img_result, '__len__'):
+                    if len(img_result) == 0:
+                        print(f"   ⚠ PaddleOCR 결과가 비어있습니다 (이미지에서 텍스트를 찾지 못함)")
+                        return []
+                    print(f"   ✅ PaddleOCR 결과: {len(img_result)}개 라인 감지 (타입: {type(img_result).__name__})")
+                else:
+                    # 길이를 알 수 없는 경우 (예: 제너레이터)
+                    print(f"   ⚠ PaddleOCR 결과 길이를 확인할 수 없습니다. 순회 시도...")
+                    try:
+                        img_result = list(img_result) if hasattr(img_result, '__iter__') and not isinstance(img_result, str) else [img_result]
+                        if len(img_result) == 0:
+                            print(f"   ⚠ PaddleOCR 결과가 비어있습니다")
+                            return []
+                        print(f"   ✅ PaddleOCR 결과: {len(img_result)}개 라인 감지 (변환 후)")
+                    except Exception as e:
+                        print(f"   ⚠ 결과 변환 실패: {e}")
+                        return []
+            
+            # 이미지 크기 (bbox가 없을 때 사용)
+            img_w, img_h = float(img_width), float(img_height)
+            
+            # OCRResult에서 추출한 데이터로 WordBox 생성
+            if texts:
+                # 디버깅: 추출된 텍스트 샘플 확인 및 인덱스 여부 체크
+                if len(texts) > 0:
+                    sample_texts = []
+                    sample_types = []
+                    for idx in range(min(5, len(texts))):
+                        sample = texts[idx]
+                        sample_texts.append(str(sample)[:50] if sample is not None else "None")
+                        sample_types.append(type(sample).__name__)
+                    print(f"   🔍 추출된 텍스트 샘플 (처음 5개): {sample_texts}")
+                    print(f"   🔍 샘플 타입: {sample_types}")
+                    
+                    # 텍스트가 인덱스(숫자)인지 확인
+                    first_text = str(texts[0]) if texts[0] is not None else ""
+                    if first_text.isdigit() or (first_text.startswith('[') and ']' in first_text):
+                        print(f"   ⚠ 경고: rec_texts가 인덱스로 보입니다! character_dict 디코딩이 필요할 수 있습니다.")
+                        print(f"   🔍 첫 번째 텍스트 값: {first_text} (타입: {type(texts[0])})")
+                        print(f"   ⚠ PaddleX가 inference.yml의 character_dict를 사용하지 않고 기본 사전을 사용 중일 수 있습니다.")
+                
+                # character_dict 로드 (인덱스 디코딩용)
+                char_dict = None
+                if os.path.exists(_TRAINED_REC_INFERENCE_YML):
+                    char_dict = _load_character_dict_from_yml(_TRAINED_REC_INFERENCE_YML)
+                    if char_dict:
+                        print(f"   ✅ character_dict 로드 완료 ({len(char_dict)}개 문자)")
+                    else:
+                        print(f"   ⚠ character_dict 로드 실패")
+                
+                for i in range(len(texts)):
+                    text_raw = texts[i]
+                    text = str(text_raw) if text_raw is not None else ""
+                    
+                    # 디버깅: 각 텍스트의 실제 값 확인 (처음 10개만)
+                    if i < 10:
+                        print(f"   🔍 텍스트[{i}] 원본: '{text[:50]}' (타입: {type(text_raw)}, 값: {repr(text_raw)[:50]})")
+                    
+                    # 텍스트가 인덱스(정수 또는 정수 리스트)인 경우 character_dict로 디코딩 시도
+                    if char_dict and text_raw is not None:
+                        try:
+                            # 정수인 경우
+                            if isinstance(text_raw, int):
+                                if 0 <= text_raw < len(char_dict):
+                                    text = char_dict[text_raw]
+                                    if i < 10:
+                                        print(f"   ✅ 인덱스 {text_raw} -> 문자 '{text}' 디코딩 성공")
+                                else:
+                                    if i < 10:
+                                        print(f"   ⚠ 인덱스 {text_raw}가 character_dict 범위를 벗어남 (최대: {len(char_dict)-1})")
+                            # 정수 리스트인 경우 (문자열로 변환)
+                            elif isinstance(text_raw, (list, tuple)) and len(text_raw) > 0:
+                                decoded_chars = []
+                                for idx in text_raw:
+                                    if isinstance(idx, int) and 0 <= idx < len(char_dict):
+                                        decoded_chars.append(char_dict[idx])
+                                if decoded_chars:
+                                    text = ''.join(decoded_chars)
+                                    if i < 10:
+                                        print(f"   ✅ 인덱스 리스트 {text_raw[:10]} -> 문자열 '{text[:50]}' 디코딩 성공")
+                            # 문자열이지만 숫자로만 구성된 경우 (인덱스 문자열)
+                            elif isinstance(text_raw, str) and text_raw.isdigit():
+                                idx = int(text_raw)
+                                if 0 <= idx < len(char_dict):
+                                    text = char_dict[idx]
+                                    if i < 10:
+                                        print(f"   ✅ 인덱스 문자열 '{text_raw}' -> 문자 '{text}' 디코딩 성공")
+                        except Exception as e:
+                            if i < 10:
+                                print(f"   ⚠ 인덱스 디코딩 실패: {e}")
+                    
+                    # 텍스트가 인덱스(정수 또는 정수 리스트)인 경우 character_dict로 디코딩 시도
+                    if char_dict and text:
+                        try:
+                            # 정수인 경우
+                            if isinstance(text_raw, int):
+                                if 0 <= text_raw < len(char_dict):
+                                    text = char_dict[text_raw]
+                                    if i < 10:
+                                        print(f"   ✅ 인덱스 {text_raw} -> 문자 '{text}' 디코딩 성공")
+                                else:
+                                    if i < 10:
+                                        print(f"   ⚠ 인덱스 {text_raw}가 character_dict 범위를 벗어남 (최대: {len(char_dict)-1})")
+                            # 정수 리스트인 경우 (문자열로 변환)
+                            elif isinstance(text_raw, (list, tuple)) and len(text_raw) > 0:
+                                decoded_chars = []
+                                for idx in text_raw:
+                                    if isinstance(idx, int) and 0 <= idx < len(char_dict):
+                                        decoded_chars.append(char_dict[idx])
+                                if decoded_chars:
+                                    text = ''.join(decoded_chars)
+                                    if i < 10:
+                                        print(f"   ✅ 인덱스 리스트 {text_raw[:10]} -> 문자열 '{text[:50]}' 디코딩 성공")
+                        except Exception as e:
+                            if i < 10:
+                                print(f"   ⚠ 인덱스 디코딩 실패: {e}")
+                    
+                    if not text.strip():
+                        continue
+                    
+                    # bbox 추출
+                    bbox = None
+                    x, y, w, h = 0.0, 0.0, 0.0, 0.0
+                    
+                    if i < len(polys) and polys[i] is not None:
+                        bbox = polys[i]
+                        try:
+                            # bbox에서 좌표 추출
+                            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                                x_coords = [float(p[0]) for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                                y_coords = [float(p[1]) for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                                
+                                if x_coords and y_coords:
+                                    x = float(min(x_coords))
+                                    y = float(min(y_coords))
+                                    x2 = float(max(x_coords))
+                                    y2 = float(max(y_coords))
+                                    w = x2 - x
+                                    h = y2 - y
+                        except Exception as e:
+                            print(f"   ⚠ 라인 {i} bbox 좌표 추출 실패: {e}")
+                            # bbox 추출 실패 시 기본값 사용
+                            x, y, w, h = 0.0, float(i * 30), img_w, 30.0
+                    else:
+                        # bbox가 없으면 기본값 사용
+                        x, y, w, h = 0.0, float(i * 30), img_w, 30.0
+                    
+                    # 신뢰도 추출
+                    conf = 0.5  # 기본값
+                    if i < len(scores) and scores[i] is not None:
+                        try:
+                            conf = float(scores[i])
+                        except (ValueError, TypeError):
+                            conf = 0.5
+                    
+                    # 텍스트 정리
+                    try:
+                        text_cleaned = sanitize_text(text, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
                         
-                        # bbox에서 좌표 추출
-                        x_coords = [p[0] for p in bbox]
-                        y_coords = [p[1] for p in bbox]
-                        x = float(min(x_coords))
-                        y = float(min(y_coords))
-                        x2 = float(max(x_coords))
-                        y2 = float(max(y_coords))
-                        w = x2 - x
-                        h = y2 - y
-                        
-                        # 텍스트 정리
-                        text = sanitize_text(text, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
-                        
-                        if text.strip():
+                        if text_cleaned.strip():
+                            # w, h가 0이면 기본값 설정
+                            if w <= 0 or h <= 0:
+                                w, h = img_w, 30.0
+                            
                             words.append(
                                 WordBox(
-                                    text=text,
+                                    text=text_cleaned,
                                     x=x,
                                     y=y,
                                     w=w,
@@ -1550,9 +2711,143 @@ def paddleocr_word_boxes(
                                     conf=conf,
                                 )
                             )
+                    except Exception as e:
+                        print(f"   ⚠ 라인 {i} WordBox 생성 실패: {e}")
+                        continue
+            
+            # 일반 리스트 형태인 경우 기존 로직 사용
+            elif not isinstance(img_result, dict) and hasattr(img_result, '__iter__') and not isinstance(img_result, str):
+                for line_idx, line in enumerate(img_result):
+                    if line is None:
+                        continue
+                    
+                    text = ""
+                    conf = 0.0
+                    bbox = None
+                    x, y, w, h = 0.0, 0.0, 0.0, 0.0
+                    
+                    # 케이스 1: line이 문자열인 경우 (현재 발생 중인 오류)
+                    if isinstance(line, str):
+                        text = line.strip()
+                        if text:
+                            # 전체 이미지를 bbox로 사용 (가상 더미 bbox)
+                            x, y = 0.0, float(line_idx * 30)  # 라인별로 약간씩 아래로 배치
+                            w, h = img_w, 30.0  # 기본 높이
+                            conf = 0.5  # 기본 신뢰도
+                            print(f"   📝 라인 {line_idx}: 문자열 형식 처리 (텍스트: {text[:50]}...)")
+                    
+                    # 케이스 2: 표준 형식 [bbox, (text, confidence)] 또는 [bbox, [text, confidence]]
+                    elif isinstance(line, (list, tuple)) and len(line) >= 2:
+                        bbox = line[0]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                        text_info = line[1]  # (text, confidence) 또는 [text, confidence]
+                        
+                        # text_info 처리
+                        if text_info is not None:
+                            if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                                text = str(text_info[0]) if text_info[0] is not None else ""
+                                try:
+                                    conf = float(text_info[1]) if text_info[1] is not None else 0.0
+                                except (ValueError, TypeError):
+                                    conf = 0.0
+                            elif isinstance(text_info, str):
+                                text = text_info
+                                conf = 0.5
+                            else:
+                                text = str(text_info) if text_info else ""
+                                conf = 0.0
+                        
+                        # bbox 처리
+                        if bbox is not None and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                            try:
+                                # bbox에서 좌표 추출
+                                x_coords = [float(p[0]) for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                                y_coords = [float(p[1]) for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                                
+                                if x_coords and y_coords:
+                                    x = float(min(x_coords))
+                                    y = float(min(y_coords))
+                                    x2 = float(max(x_coords))
+                                    y2 = float(max(y_coords))
+                                    w = x2 - x
+                                    h = y2 - y
+                            except Exception as e:
+                                print(f"   ⚠ 라인 {line_idx} bbox 좌표 추출 실패: {e}")
+                                # bbox 추출 실패 시 전체 이미지 사용
+                                x, y, w, h = 0.0, float(line_idx * 30), img_w, 30.0
+                        else:
+                            # bbox가 유효하지 않으면 전체 이미지 사용
+                            x, y, w, h = 0.0, float(line_idx * 30), img_w, 30.0
+                    
+                    # 케이스 3: 간소화 형식 (text, confidence) 또는 [text, confidence]
+                    elif isinstance(line, (list, tuple)) and len(line) >= 1:
+                        # 첫 번째 요소가 텍스트
+                        if isinstance(line[0], str):
+                            text = line[0]
+                        else:
+                            text = str(line[0]) if line[0] is not None else ""
+                        
+                        # 두 번째 요소가 confidence (있는 경우)
+                        if len(line) >= 2:
+                            try:
+                                conf = float(line[1]) if line[1] is not None else 0.0
+                            except (ValueError, TypeError):
+                                conf = 0.0
+                        else:
+                            conf = 0.5
+                        
+                        # bbox 없음, 전체 이미지 사용
+                        x, y, w, h = 0.0, float(line_idx * 30), img_w, 30.0
+                        print(f"   📝 라인 {line_idx}: 간소화 형식 처리 (텍스트: {text[:50]}...)")
+                    
+                    # 케이스 4: 알 수 없는 형식
+                    else:
+                        print(f"   ⚠ 라인 {line_idx} 알 수 없는 형식: {type(line)}, 값: {str(line)[:100]}")
+                        # 그래도 텍스트 추출 시도
+                        if isinstance(line, str):
+                            text = line.strip()
+                            x, y, w, h = 0.0, float(line_idx * 30), img_w, 30.0
+                            conf = 0.5
+                        else:
+                            continue
+                    
+                    # 텍스트가 있으면 WordBox 생성
+                    if text:
+                        try:
+                            # 텍스트 정리
+                            text_cleaned = sanitize_text(text, remove_emoji=remove_emoji, keep_newlines=False, collapse_spaces=False)
+                            
+                            if text_cleaned.strip():
+                                # w, h가 0이면 기본값 설정
+                                if w <= 0 or h <= 0:
+                                    w, h = img_w, 30.0
+                                
+                                words.append(
+                                    WordBox(
+                                        text=text_cleaned,
+                                        x=x,
+                                        y=y,
+                                        w=w,
+                                        h=h,
+                                        conf=conf,
+                                    )
+                                )
+                        except Exception as e:
+                            print(f"   ⚠ 라인 {line_idx} WordBox 생성 실패: {e}")
+                            continue
+        else:
+            print(f"   ⚠ PaddleOCR 결과 형식 오류: {type(result)}, 길이: {len(result) if hasattr(result, '__len__') else 'N/A'}")
+            return []
+        
+        if words:
+            print(f"   ✅ PaddleOCR WordBox 추출 성공: {len(words)}개 단어 인식")
+        else:
+            print(f"   ⚠ PaddleOCR WordBox 추출 결과가 비어있습니다 (결과 파싱 후 단어 없음)")
+        
         return words
     except Exception as e:
         print(f"⚠ PaddleOCR WordBox 추출 실패: {e}")
+        import traceback
+        print(f"   상세 오류: {traceback.format_exc()}")
         return []
 
 
@@ -1562,15 +2857,22 @@ def get_paddleocr_words(
     scale: int = 3,
     code_mode: bool = True,
     remove_emoji: bool = True,
-    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+    use_local_model: bool = False,  # 사용 안 함 (v2.0 구버전, 제거됨)
+    use_trained_model: bool = True,  # 기본값: v5 학습된 모델 사용 (코드 문법 인식 최적화)
 ) -> List[WordBox]:
-    """PaddleOCR로 WordBox 리스트 추출 (이미지 전처리 포함)"""
+    """PaddleOCR로 WordBox 리스트 추출 (이미지 전처리 포함, v5 학습된 모델 우선 사용)"""
     pil_img = open_image_any(img)
     if scale and scale != 1:
         w, h = pil_img.size
         pil_img = pil_img.resize((w * scale, h * scale), Image.LANCZOS)
     pil_img = preprocess_for_code_pil(pil_img, enabled=code_mode)
-    return paddleocr_word_boxes(pil_img, code_mode=code_mode, remove_emoji=remove_emoji, use_local_model=use_local_model)
+    return paddleocr_word_boxes(
+        pil_img, 
+        code_mode=code_mode, 
+        remove_emoji=remove_emoji, 
+        use_local_model=use_local_model,
+        use_trained_model=use_trained_model
+    )
 
 
 def image_to_text_paddleocr(
@@ -1581,16 +2883,42 @@ def image_to_text_paddleocr(
     normalize: bool = True,
     indent_step: int = 4,
     remove_emoji: bool = True,
-    use_local_model: bool = False,  # 기본값: 최신 자동 다운로드 모델 사용
+    use_local_model: bool = False,  # 사용 안 함 (v2.0 구버전, 제거됨)
+    use_trained_model: bool = True,  # 기본값: v5 학습된 모델 사용 (코드 문법 인식 최적화)
 ) -> str:
-    """PaddleOCR로 텍스트 추출"""
+    """PaddleOCR로 텍스트 추출 (v5 학습된 모델 우선 사용)"""
     pil_img = open_image_any(img)
+    original_size = pil_img.size
+    
     if scale and scale != 1:
         w, h = pil_img.size
         pil_img = pil_img.resize((w * scale, h * scale), Image.LANCZOS)
-    pil_img = preprocess_for_code_pil(pil_img, enabled=code_mode)
+        print(f"   이미지 리사이즈: {original_size} → {pil_img.size} (scale={scale})")
     
-    words = paddleocr_word_boxes(pil_img, code_mode=code_mode, remove_emoji=remove_emoji, use_local_model=use_local_model)
+    # 전처리 적용
+    pil_img_processed = preprocess_for_code_pil(pil_img, enabled=code_mode)
+    
+    # v5 학습된 모델로 OCR 실행
+    words = paddleocr_word_boxes(
+        pil_img_processed, 
+        code_mode=code_mode, 
+        remove_emoji=remove_emoji, 
+        use_local_model=use_local_model,
+        use_trained_model=use_trained_model
+    )
+    
+    # 전처리된 이미지에서 결과가 없으면 원본 이미지로 재시도
+    if not words and code_mode:
+        print(f"   ⚠ 전처리된 이미지에서 결과 없음, 원본 이미지로 재시도...")
+        words = paddleocr_word_boxes(
+            pil_img,  # 원본 이미지 사용
+            code_mode=False,  # 전처리 비활성화
+            remove_emoji=remove_emoji, 
+            use_local_model=use_local_model,
+            use_trained_model=use_trained_model
+        )
+        if words:
+            print(f"   ✅ 원본 이미지에서 {len(words)}개 단어 인식 성공")
     
     if not words:
         return ""
@@ -1658,27 +2986,34 @@ def capture_and_ocr() -> dict:
         
         if paddleocr_available:
             try:
-                # 최신 자동 다운로드 모델 사용 (PP-OCRv4/v5, 한글+영어 최적화)
-                print(f"🚀 PaddleOCR 실행 중... (최신 자동 다운로드 모델, PP-OCRv4/v5)")
-                # WordBox 가져오기
+                # v5 학습된 모델 사용 (코드 문법 인식 최적화, 88.96% 정확도)
+                print(f"🚀 PaddleOCR 실행 중... (v5 학습된 전용 모델, 코드 문법 인식 최적화)")
+                # WordBox 가져오기 (v5 학습된 모델 명시적 사용)
                 paddleocr_words = get_paddleocr_words(
                     cropped,
                     scale=3,
                     code_mode=True,
                     remove_emoji=True,
-                    use_local_model=False  # 최신 모델 사용
+                    use_local_model=False,  # 로컬 모델 사용 안 함 (v2.0 구버전, 제거됨)
+                    use_trained_model=True  # v5 학습된 모델 사용
                 )
-                # 전체 텍스트도 가져오기
+                # 전체 텍스트도 가져오기 (v5 학습된 모델 명시적 사용)
                 paddleocr_text = image_to_text_paddleocr(
                     cropped,
                     scale=3,
                     code_mode=True,
                     normalize=True,
-                    use_local_model=False  # 최신 모델 사용
+                    use_local_model=False,  # 로컬 모델 사용 안 함 (v2.0 구버전, 제거됨)
+                    use_trained_model=True  # v5 학습된 모델 사용
                 )
-                print("✅ PaddleOCR 완료")
+                if paddleocr_text:
+                    print(f"✅ PaddleOCR 완료 (인식된 텍스트 길이: {len(paddleocr_text)} 문자)")
+                else:
+                    print(f"⚠ PaddleOCR 완료했지만 텍스트가 비어있습니다.")
             except Exception as e:
                 print(f"⚠ PaddleOCR 실패: {e}")
+                import traceback
+                print(f"   상세 오류: {traceback.format_exc()}")
         
         if tesseract_available:
             try:
@@ -1730,15 +3065,17 @@ def capture_and_ocr() -> dict:
                     winrt_words,
                     pil_img
                 )
-                ocr_method = "PaddleOCR + WinRT 병합 (최신 PP-OCRv4/v5, 정확도 최적화)"
+                ocr_method = "PaddleOCR + WinRT 병합 (v5 학습된 모델 사용, 코드 문법 인식 최적화)"
             except Exception as e:
-                print(f"⚠ PaddleOCR+WinRT 병합 실패: {e}, PaddleOCR 결과 사용")
+                print(f"⚠ PaddleOCR+WinRT 병합 실패: {e}")
+                import traceback
+                print(f"   상세 오류: {traceback.format_exc()}")
                 if paddleocr_text:
                     ocr_result = paddleocr_text
-                    ocr_method = "PaddleOCR (최신 PP-OCRv4/v5, 병합 실패)"
+                    ocr_method = "PaddleOCR (v5 학습된 모델 사용, 병합 실패)"
         elif paddleocr_text:
             ocr_result = paddleocr_text
-            ocr_method = "PaddleOCR (최신 PP-OCRv4/v5, 한글+영어 최적화)"
+            ocr_method = "PaddleOCR (v5 학습된 모델 사용, 코드 문법 인식 최적화, 88.96% 정확도)"
         elif tesseract_words and winrt_words:
             try:
                 pil_img = open_image_any(cropped)
@@ -1760,11 +3097,16 @@ def capture_and_ocr() -> dict:
             ocr_result = winrt_text
             ocr_method = "WinRT"
         
-        if ocr_result:
+        if ocr_result and ocr_result.strip():
             # 클립보드에 저장
             print(f"✅ OCR 완료 ({ocr_method})")
-            copy_to_clipboard(ocr_result)
-            print("📋 클립보드에 저장 완료")
+            print(f"   인식된 텍스트 길이: {len(ocr_result)} 문자, 줄 수: {ocr_result.count(chr(10)) + 1}")
+            try:
+                copy_to_clipboard(ocr_result)
+                print("📋 클립보드에 저장 완료")
+            except Exception as e:
+                print(f"⚠ 클립보드 저장 실패: {e}")
+            
             return {
                 "success": True,
                 "text": ocr_result,
@@ -1772,9 +3114,25 @@ def capture_and_ocr() -> dict:
                 "error": None
             }
         else:
+            # OCR 결과가 비어있는 경우 상세 정보 출력
+            error_details = []
+            if not paddleocr_available:
+                error_details.append(f"PaddleOCR: {paddleocr_error or '사용 불가'}")
+            if not tesseract_available:
+                error_details.append("Tesseract: 사용 불가")
+            if not winrt_available:
+                error_details.append(f"WinRT: {winrt_error or '사용 불가'}")
+            if paddleocr_available and not paddleocr_text:
+                error_details.append("PaddleOCR: 실행했지만 결과가 비어있음")
+            
+            error_msg = "모든 OCR 엔진이 실패했습니다."
+            if error_details:
+                error_msg += f" ({', '.join(error_details)})"
+            
+            print(f"❌ OCR 실패: {error_msg}")
             return {
                 "success": False,
-                "error": "모든 OCR 엔진이 실패했습니다.",
+                "error": error_msg,
                 "text": "",
                 "method": ""
             }
@@ -1782,21 +3140,27 @@ def capture_and_ocr() -> dict:
     except ValueError as e:
         # 사용자가 ROI 선택을 취소한 경우
         if "취소" in str(e) or "cancel" in str(e).lower():
+            print("⚠ 사용자가 영역 선택을 취소했습니다.")
             return {
                 "success": False,
                 "error": "사용자가 영역 선택을 취소했습니다.",
                 "text": "",
                 "method": ""
             }
+        print(f"❌ ValueError 발생: {e}")
+        import traceback
+        print(f"   상세 오류: {traceback.format_exc()}")
         return {
             "success": False,
-            "error": str(e),
+            "error": f"영역 선택 오류: {str(e)}",
             "text": "",
             "method": ""
         }
     except Exception as e:
         import traceback
-        error_msg = f"OCR 처리 중 오류 발생: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"OCR 처리 중 오류 발생: {str(e)}"
+        print(f"❌ 예상치 못한 오류 발생: {error_msg}")
+        print(f"   상세 오류: {traceback.format_exc()}")
         return {
             "success": False,
             "error": error_msg,

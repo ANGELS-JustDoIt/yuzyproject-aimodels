@@ -46,73 +46,60 @@ venv_ocr/
 yuzyproject-backend/
 yuzyproject-frontend/
 
-# OCR and Analysis outputs
-yuzyproject-aimodels/aimodels/
-yuzyproject-aimodels/outputs/
+# OCR and Analysis outputs (실행 결과)
 outputs/
+*.log
+logs/
 
-# PaddleOCR training outputs and checkpoints
-PaddleOCR/output/
-PaddleOCR/.paddlers/
-PaddleOCR/**/best_model/
-PaddleOCR/**/latest.*
-PaddleOCR/**/*.pdparams
-PaddleOCR/**/*.pdopt
-PaddleOCR/**/*.states
-PaddleOCR/**/inference/
-**/*.pdparams
-**/*.pdopt
-**/*.states
-**/best_model/
-**/latest.*
-**/inference/
+# PaddleOCR training outputs and checkpoints (학습 결과물)
+# 학습된 모델 파일들 (너무 크므로 제외)
+output/**/*.pdparams
+output/**/*.pdopt
+output/**/*.states
+output/**/best_model/
+output/**/latest.*
+output/**/train.log
 
-# 예외: 특정 모델 파일은 커밋 (필요한 경우)
-# !output/det_ke_model/best_accuracy.pdparams
+# 예외: inference 모델의 character_dict.txt와 inference.yml은 커밋 필요
+!output/**/character_dict.txt
+!output/**/inference.yml
+!output/**/inference.pdmodel
+!output/**/inference.pdiparams
+!output/**/inference.pdiparams.info
+
+# Dataset files (너무 크므로 제외)
+train_data/**/*.jpg
+train_data/**/*.jpeg
+train_data/**/*.JPG
+train_data/**/*.png
+train_data/**/*.txt
+!train_data/**/rec_gt_train.txt
+!train_data/**/rec_gt_test.txt
+!train_data/**/train_label.txt
+!train_data/**/test_label.txt
+!train_data/**/val_label.txt
+
+# 이전 데이터셋 폴더
+code_syntax_dataset/
+core/paddle_train/data/
+core/paddle_train/data_backup/
 
 # Temporary analysis files
 **/aimodels/**/*_raw_output.txt
 **/aimodels/**/*_extracted_json.json
 **/aimodels/**/*_parsed_json.json
 **/aimodels/**/*_json_error.txt
-
-# Dataset files (too large for git)
-yuzyproject-aimodels/code_syntax_dataset/
-data/
-OCR_Data/
-PaddleData/
-S:/OCR_Data/
-
-# PaddleOCR output and checkpoints
-PaddleOCR/output/
-PaddleOCR/.paddlers/
-PaddleOCR/**/best_model/
-PaddleOCR/**/latest.*
-PaddleOCR/**/*.pdparams
-PaddleOCR/**/*.pdopt
-PaddleOCR/**/*.states
-PaddleOCR/**/inference/
-
-# Model files
-*.pdparams
-*.pdopt
-*.states
-**/best_model/
-**/latest.*
-**/inference/
+project_full_context.txt
+project_full_context_2.txt
 
 # Server model files
-yuzyproject-aimodels/server/
+server/
 output_root/
 
 # Environment variables
 .env
 .env.local
 .env.*.local
-
-# Logs
-*.log
-logs/
 
 # OS
 Thumbs.db
@@ -135,10 +122,18 @@ dmypy.json
 
 # Temporary files
 test.ipynb
-project_full_context.txt
-project_full_context_2.txt
-.png
 rendered_code_cards/
-server/
 test/
 debug_outputs/
+
+# 이미지 파일 (일반적으로 제외, 하지만 필요시 예외 처리)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+
+# 예외: 문서나 설정에 필요한 이미지는 커밋 가능하도록
+# !doc/**/*.png
+# !doc/**/*.jpg

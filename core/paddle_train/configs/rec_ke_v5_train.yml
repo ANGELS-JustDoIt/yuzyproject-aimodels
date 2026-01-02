@@ -1,0 +1,139 @@
+Global:
+  debug: false
+  use_gpu: true
+  epoch_num: 100
+  log_smooth_window: 20
+  print_batch_step: 100
+  save_model_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\ppocr_v5_training_20260102_023212\rec_model
+  save_epoch_step: 5
+  eval_batch_step: 500
+  cal_metric_during_train: true
+  pretrained_model: null
+  checkpoints: null
+  use_visualdl: false
+  infer_img: doc/imgs_words/en/word_1.png
+  save_inference_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\ppocr_v5_training_20260102_023212\rec_inference
+  use_pdserving: false
+  character_dict_path: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\rec_ke_v5_inference\character_dict.txt
+  use_space_char: true
+  max_text_length: 25
+  infer_mode: false
+
+Architecture:
+  model_type: rec
+  algorithm: SVTR_LCNet
+  Transform: null
+  Backbone:
+    name: PPLCNetV3
+    scale: 0.95
+  Head:
+    name: MultiHead
+    head_list:
+    - CTCHead:
+        Neck:
+          name: svtr
+          dims: 120
+          depth: 2
+          hidden_dims: 120
+          kernel_size:
+          - 1
+          - 3
+          use_guide: true
+        Head:
+          fc_decay: 1.0e-05
+    - NRTRHead:
+        nrtr_dim: 384
+        max_text_length: 25
+
+Loss:
+  name: MultiLoss
+  loss_config_list:
+  - CTCLoss: null
+  - NRTRLoss: null
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Cosine
+    learning_rate: 0.001
+    warmup_epoch: 5
+  regularizer:
+    name: L2
+    factor: 3.0e-05
+
+PostProcess:
+  name: CTCLabelDecode
+  character_dict_path: C:\Pyg\Projects\semi\yuzyproject-aimodels\output\rec_ke_v5_inference\character_dict.txt
+  use_space_char: true
+
+Metric:
+  name: RecMetric
+  main_indicator: acc
+
+Train:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\rec
+    label_file_list:
+    - C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\rec\rec_gt_train.txt
+    ratio_list:
+    - 1.0
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - MultiLabelEncode:
+        gtc_encode: NRTRLabelEncode
+    - RecResizeImg:
+        image_shape:
+        - 3
+        - 48
+        - 320
+    - KeepKeys:
+        keep_keys:
+        - image
+        - label_ctc
+        - label_gtc
+        - length
+        - valid_ratio
+  loader:
+    shuffle: true
+    batch_size_per_card: 44
+    drop_last: true
+    num_workers: 4
+    pin_memory: true
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\rec
+    label_file_list:
+    - C:\Pyg\Projects\semi\yuzyproject-aimodels\core\paddle_train\train_data\rec\rec_gt_test.txt
+    ratio_list:
+    - 1.0
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - MultiLabelEncode:
+        gtc_encode: NRTRLabelEncode
+    - RecResizeImg:
+        image_shape:
+        - 3
+        - 48
+        - 320
+    - KeepKeys:
+        keep_keys:
+        - image
+        - label_ctc
+        - label_gtc
+        - length
+        - valid_ratio
+  loader:
+    shuffle: false
+    batch_size_per_card: 44
+    drop_last: false
+    num_workers: 4
+    pin_memory: true
