@@ -5,6 +5,7 @@ import sys
 import os
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Union
 import numpy as np
@@ -12,6 +13,12 @@ import cv2
 from PIL import Image, ImageEnhance, ImageFilter
 from mss import mss
 import pyperclip
+
+# 창 최소화용 (선택적)
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
 
 # ------------------------------------------------------------
 # OCR 유틸 (기존 ocr_utils.py 내용을 이 파일로 통합)
@@ -1022,7 +1029,7 @@ def check_winrt_available():
 
 def capture_and_ocr() -> dict:
     """
-    화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
+    브라우저 창 최소화 -> 화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
     
     Returns:
         dict: {
@@ -1033,6 +1040,20 @@ def capture_and_ocr() -> dict:
         }
     """
     try:
+        # 브라우저 창 최소화
+        if pyautogui is not None:
+            try:
+                # Alt+Space, N 키 조합으로 현재 활성 창 최소화 (Windows)
+                pyautogui.hotkey('alt', 'space')
+                time.sleep(0.15)
+                pyautogui.press('n')
+                time.sleep(0.8)  # 창이 완전히 최소화될 시간 대기
+                print("✅ 브라우저 창 최소화 완료")
+            except Exception as e:
+                print(f"⚠ 창 최소화 실패 (계속 진행): {e}")
+        else:
+            print("⚠ pyautogui가 설치되지 않아 창 최소화를 건너뜁니다")
+        
         # Tesseract와 WinRT 사용 가능 여부 확인
         tesseract_available = pytesseract is not None
         winrt_available, winrt_error = check_winrt_available()

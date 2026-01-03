@@ -1,4 +1,5 @@
 # project_root/main.py
+import os
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -21,10 +22,14 @@ from core.capture import capture_and_ocr
 app = FastAPI(title="TaskFlow Analyzer", version="1.0.0")
 
 # CORS 설정: 프론트엔드(Next.js)에서 호출할 수 있도록 허용
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+# 환경 변수에서 허용할 origin 목록을 가져오거나 기본값 사용
+allowed_origins = os.getenv("FRONTEND_URL", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+# IP 주소 패턴도 허용 (개발 환경)
+if os.getenv("NODE_ENV") != "production":
+    # 모든 origin 허용 (개발 환경)
+    origins = ["*"]
+else:
+    origins = allowed_origins
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,9 +164,24 @@ def get_explain(request_id: str):
 
 
 @app.post("/capture")
-def capture():
+async def capture(
+    file: UploadFile = File(default=None),
+    lang: str = "kor+eng",
+    scale: int = 3,
+    code_mode: bool = True,
+    layout: bool = True,
+    normalize: bool = True,
+):
     """
-    화면 캡처 -> 드래그로 영역 선택 -> OCR 인식 -> 클립보드 저장
+    이미지 파일 업로드 -> OCR 인식
+    
+    Parameters:
+        file: 업로드할 이미지 파일 (선택적, 없으면 화면 캡처 모드)
+        lang: OCR 언어 (기본값: "kor+eng")
+        scale: 이미지 스케일 (기본값: 3)
+        code_mode: 코드 모드 활성화 (기본값: True)
+        layout: 레이아웃 모드 활성화 (기본값: True)
+        normalize: 정규화 활성화 (기본값: True)
     
     Returns:
         JSONResponse: {
@@ -171,8 +191,148 @@ def capture():
             "error": str (에러 메시지, 실패 시)
         }
     """
-    result = capture_and_ocr()
-    return JSONResponse(content=result)
+    try:
+        # 파일이 업로드된 경우
+        if file is not None:
+            from PIL import Image
+            import io
+            import numpy as np
+            import cv2
+            
+            # 파일 읽기
+            contents = await file.read()
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is None:
+                raise HTTPException(status_code=400, detail="이미지 파일을 읽을 수 없습니다.")
+            
+            # OCR 수행
+            from core.capture import image_to_text, get_tesseract_words, get_winrt_words, merge_tesseract_winrt_results, open_image_any
+            
+            try:
+                # Tesseract와 WinRT 모두 시도
+                tesseract_words = None
+                winrt_words = None
+                ocr_result = None
+                ocr_method = None
+                
+                try:
+                    tesseract_words = get_tesseract_words(
+                        img,
+                        lang=lang,
+                        scale=scale,
+                        code_mode=code_mode,
+                        remove_emoji=True
+                    )
+                except Exception as e:
+                    print(f"⚠ Tesseract OCR 실패: {e}")
+                
+                try:
+                    from core.capture import check_winrt_available
+                    winrt_available, _ = check_winrt_available()
+                    if winrt_available:
+                        winrt_words = get_winrt_words(
+                            img,
+                            scale=scale,
+                            code_mode=code_mode,
+                            remove_emoji=True
+                        )
+                except Exception as e:
+                    print(f"⚠ WinRT OCR 실패: {e}")
+                
+                # 결과 병합 또는 단일 결과 사용
+                if tesseract_words and winrt_words:
+                    try:
+                        pil_img = open_image_any(img)
+                        ocr_result = merge_tesseract_winrt_results(
+                            tesseract_words,
+                            winrt_words,
+                            pil_img
+                        )
+                        ocr_method = "Tesseract + WinRT 병합"
+                    except Exception as e:
+                        print(f"⚠ 병합 실패: {e}, Tesseract 결과 사용")
+                        from core.capture import reconstruct_text_from_words
+                        ocr_result = reconstruct_text_from_words(
+                            tesseract_words,
+                            code_mode=code_mode,
+                            normalize=normalize,
+                            indent_step=4,
+                            remove_emoji=True,
+                        )
+                        ocr_method = "Tesseract (병합 실패)"
+                elif tesseract_words:
+                    from core.capture import reconstruct_text_from_words
+                    ocr_result = reconstruct_text_from_words(
+                        tesseract_words,
+                        code_mode=code_mode,
+                        normalize=normalize,
+                        indent_step=4,
+                        remove_emoji=True,
+                    )
+                    ocr_method = "Tesseract"
+                elif winrt_words:
+                    from core.capture import image_to_text_winrt
+                    ocr_result = image_to_text_winrt(
+                        img,
+                        scale=scale,
+                        code_mode=code_mode,
+                        normalize=normalize,
+                        indent_step=4,
+                        remove_emoji=True,
+                    )
+                    ocr_method = "WinRT"
+                else:
+                    # 기본 OCR 시도
+                    ocr_result = image_to_text(
+                        img,
+                        lang=lang,
+                        scale=scale,
+                        code_mode=code_mode,
+                        layout=layout,
+                        normalize=normalize,
+                        indent_step=4,
+                        remove_emoji=True,
+                    )
+                    ocr_method = "Tesseract (기본)"
+                
+                if ocr_result:
+                    return JSONResponse(content={
+                        "success": True,
+                        "text": ocr_result,
+                        "method": ocr_method,
+                        "error": None
+                    })
+                else:
+                    return JSONResponse(content={
+                        "success": False,
+                        "error": "OCR 결과가 비어있습니다.",
+                        "text": "",
+                        "method": ""
+                    })
+            except Exception as e:
+                import traceback
+                error_msg = f"OCR 처리 중 오류 발생: {str(e)}\n{traceback.format_exc()}"
+                return JSONResponse(content={
+                    "success": False,
+                    "error": error_msg,
+                    "text": "",
+                    "method": ""
+                })
+        else:
+            # 파일이 없으면 기존 화면 캡처 모드
+            result = capture_and_ocr()
+            return JSONResponse(content=result)
+    except Exception as e:
+        import traceback
+        error_msg = f"처리 중 오류 발생: {str(e)}\n{traceback.format_exc()}"
+        return JSONResponse(content={
+            "success": False,
+            "error": error_msg,
+            "text": "",
+            "method": ""
+        })
 
 
 def json_load_safe(text: str):
